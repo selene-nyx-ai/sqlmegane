@@ -1,0 +1,602 @@
+/* SQLMegane（SQLめがね） - スタイル
+   ダーク寄りの開発者向けトーン。外部フォント・CDNは使用しない。 */
+
+:root {
+  color-scheme: dark;
+
+  --bg: #0d1117;
+  --bg-elevated: #11161d;
+  --panel: #161b22;
+  --panel-border: #262c36;
+  --panel-border-soft: #1f242d;
+  --text: #e6edf3;
+  --text-muted: #9aa5b1;
+  --text-faint: #6b7583;
+
+  --accent: #4fa3ff;
+  --accent-strong: #7db8ff;
+
+  --danger: #ff6b6b;
+  --danger-bg: rgba(255, 107, 107, 0.12);
+  --danger-border: rgba(255, 107, 107, 0.35);
+
+  --warning: #ffb454;
+  --warning-bg: rgba(255, 180, 84, 0.12);
+  --warning-border: rgba(255, 180, 84, 0.35);
+
+  --info: #5cc8ff;
+  --info-bg: rgba(92, 200, 255, 0.10);
+  --info-border: rgba(92, 200, 255, 0.30);
+
+  --ok: #57d38c;
+  --ok-bg: rgba(87, 211, 140, 0.10);
+  --ok-border: rgba(87, 211, 140, 0.30);
+
+  --neutral: #9aa5b1;
+  --neutral-bg: rgba(154, 165, 177, 0.12);
+  --neutral-border: rgba(154, 165, 177, 0.35);
+
+  --radius: 10px;
+  --font-sans: -apple-system, BlinkMacSystemFont, "Segoe UI", "Hiragino Kaku Gothic ProN",
+    "Hiragino Sans", "Yu Gothic UI", "Noto Sans JP", sans-serif;
+  --font-mono: ui-monospace, SFMono-Regular, "Cascadia Mono", Consolas, "Courier New", monospace;
+}
+
+* {
+  box-sizing: border-box;
+}
+
+html, body {
+  margin: 0;
+  padding: 0;
+}
+
+body {
+  background: var(--bg);
+  color: var(--text);
+  font-family: var(--font-sans);
+  line-height: 1.6;
+  overflow-x: hidden;
+}
+
+.container {
+  max-width: 880px;
+  margin: 0 auto;
+  padding: 0 20px;
+}
+
+.sr-only {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  overflow: hidden;
+  clip: rect(0 0 0 0);
+  white-space: nowrap;
+}
+
+/* ---------- ヘッダー ---------- */
+
+.site-header {
+  border-bottom: 1px solid var(--panel-border-soft);
+  background: linear-gradient(180deg, var(--bg-elevated), var(--bg));
+  padding: 22px 0;
+}
+
+.header-inner {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 16px;
+  flex-wrap: wrap;
+}
+
+.brand {
+  display: flex;
+  align-items: center;
+  gap: 14px;
+}
+
+.brand-mark {
+  font-size: 30px;
+  line-height: 1;
+}
+
+.brand-name {
+  margin: 0;
+  font-size: 1.4rem;
+  font-weight: 700;
+  letter-spacing: 0.01em;
+}
+
+.brand-suffix {
+  font-size: 0.75em;
+  font-weight: 400;
+  color: var(--text-faint);
+}
+
+.brand-tagline {
+  margin: 4px 0 0;
+  font-size: 0.85rem;
+  color: var(--text-muted);
+}
+
+.badge {
+  display: inline-block;
+  font-size: 0.75rem;
+  padding: 5px 12px;
+  border-radius: 999px;
+  border: 1px solid var(--panel-border);
+  white-space: nowrap;
+}
+
+.badge-proto {
+  color: var(--warning);
+  background: var(--warning-bg);
+  border-color: var(--warning-border);
+}
+
+/* ---------- プライバシーバナー ---------- */
+
+.privacy-banner {
+  display: flex;
+  align-items: flex-start;
+  gap: 10px;
+  margin: 24px 0;
+  padding: 12px 16px;
+  border-radius: var(--radius);
+  background: var(--ok-bg);
+  border: 1px solid var(--ok-border);
+  font-size: 0.9rem;
+  color: var(--text);
+}
+
+.privacy-banner p {
+  margin: 0;
+}
+
+.privacy-icon {
+  font-size: 1.05rem;
+  line-height: 1.4;
+}
+
+/* ---------- パネル共通 ---------- */
+
+.panel {
+  background: var(--panel);
+  border: 1px solid var(--panel-border);
+  border-radius: var(--radius);
+  padding: 20px;
+  margin-bottom: 24px;
+}
+
+.panel-title {
+  font-weight: 600;
+  font-size: 0.95rem;
+  display: block;
+}
+
+/* ---------- 入力パネル ---------- */
+
+.input-panel-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  flex-wrap: wrap;
+  margin-bottom: 10px;
+}
+
+.dialect-select-wrap {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  font-size: 0.85rem;
+  color: var(--text-muted);
+}
+
+.dialect-select-wrap select {
+  background: var(--bg-elevated);
+  color: var(--text);
+  border: 1px solid var(--panel-border);
+  border-radius: 6px;
+  padding: 6px 10px;
+  font-size: 0.85rem;
+  font-family: inherit;
+}
+
+.sql-textarea {
+  width: 100%;
+  min-height: 200px;
+  resize: vertical;
+  background: var(--bg-elevated);
+  color: var(--text);
+  border: 1px solid var(--panel-border);
+  border-radius: 8px;
+  padding: 14px;
+  font-family: var(--font-mono);
+  font-size: 0.9rem;
+  line-height: 1.55;
+  tab-size: 2;
+}
+
+.sql-textarea:focus {
+  outline: none;
+  border-color: var(--accent);
+  box-shadow: 0 0 0 3px rgba(79, 163, 255, 0.15);
+}
+
+.input-panel-actions {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  margin-top: 14px;
+  flex-wrap: wrap;
+}
+
+.hint {
+  font-size: 0.78rem;
+  color: var(--text-faint);
+}
+
+/* ---------- ボタン ---------- */
+
+.btn {
+  font-family: inherit;
+  font-size: 0.88rem;
+  font-weight: 600;
+  padding: 9px 18px;
+  border-radius: 7px;
+  border: 1px solid transparent;
+  cursor: pointer;
+  transition: filter 0.15s ease, background 0.15s ease;
+}
+
+.btn-primary {
+  background: var(--accent);
+  color: #051220;
+}
+
+.btn-primary:hover:not(:disabled) {
+  filter: brightness(1.08);
+}
+
+.btn-ghost {
+  background: transparent;
+  color: var(--text-muted);
+  border-color: var(--panel-border);
+}
+
+.btn-ghost:hover:not(:disabled) {
+  color: var(--text);
+  border-color: var(--text-muted);
+}
+
+.btn:disabled {
+  opacity: 0.5;
+  cursor: not-allowed;
+}
+
+.btn-copy {
+  background: var(--bg-elevated);
+  color: var(--accent-strong);
+  border-color: var(--panel-border);
+  font-size: 0.8rem;
+  padding: 6px 12px;
+}
+
+.btn-copy:hover {
+  border-color: var(--accent);
+}
+
+.btn-copy.copied {
+  color: var(--ok);
+  border-color: var(--ok-border);
+}
+
+/* ---------- 結果エリア ---------- */
+
+.results {
+  display: flex;
+  flex-direction: column;
+  gap: 16px;
+  margin-bottom: 36px;
+}
+
+.empty-state {
+  color: var(--text-faint);
+  font-size: 0.9rem;
+  padding: 24px 4px;
+  text-align: center;
+}
+
+.global-findings {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+}
+
+.stmt-card {
+  background: var(--panel);
+  border: 1px solid var(--panel-border);
+  border-radius: var(--radius);
+  overflow: hidden;
+}
+
+.stmt-card-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+  flex-wrap: wrap;
+  padding: 12px 16px;
+  background: var(--bg-elevated);
+  border-bottom: 1px solid var(--panel-border-soft);
+}
+
+.stmt-title {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  font-size: 0.85rem;
+  color: var(--text-muted);
+}
+
+.stmt-number {
+  font-weight: 700;
+  color: var(--text);
+}
+
+.stmt-kind {
+  font-family: var(--font-mono);
+  font-size: 0.75rem;
+  padding: 2px 8px;
+  border-radius: 5px;
+  background: rgba(255, 255, 255, 0.06);
+  color: var(--text-muted);
+}
+
+.severity-counts {
+  display: flex;
+  gap: 6px;
+  flex-wrap: wrap;
+}
+
+.severity-chip {
+  font-size: 0.72rem;
+  font-weight: 700;
+  padding: 3px 9px;
+  border-radius: 999px;
+  border: 1px solid;
+}
+
+.severity-chip.danger { color: var(--danger); background: var(--danger-bg); border-color: var(--danger-border); }
+.severity-chip.warning { color: var(--warning); background: var(--warning-bg); border-color: var(--warning-border); }
+.severity-chip.info { color: var(--info); background: var(--info-bg); border-color: var(--info-border); }
+/* 「危険の検出なし」チップは安全と誤読されないよう、緑ではなくニュートラルな色にする */
+.severity-chip.ok { color: var(--neutral); background: var(--neutral-bg); border-color: var(--neutral-border); }
+
+.stmt-sql {
+  margin: 0;
+  padding: 14px 16px;
+  font-family: var(--font-mono);
+  font-size: 0.83rem;
+  color: var(--text-muted);
+  background: var(--bg);
+  border-bottom: 1px solid var(--panel-border-soft);
+  white-space: pre-wrap;
+  word-break: break-word;
+  overflow-x: auto;
+  max-height: 220px;
+  overflow-y: auto;
+}
+
+.findings-list {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  padding: 14px 16px;
+}
+
+.finding {
+  border-radius: 8px;
+  border: 1px solid;
+  padding: 12px 14px;
+  border-left-width: 4px;
+}
+
+.finding.danger { background: var(--danger-bg); border-color: var(--danger-border); border-left-color: var(--danger); }
+.finding.warning { background: var(--warning-bg); border-color: var(--warning-border); border-left-color: var(--warning); }
+.finding.info { background: var(--info-bg); border-color: var(--info-border); border-left-color: var(--info); }
+
+.finding-head {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  font-weight: 700;
+  font-size: 0.88rem;
+  margin-bottom: 4px;
+}
+
+.finding-head .sev-label {
+  font-size: 0.68rem;
+  font-weight: 800;
+  letter-spacing: 0.04em;
+  padding: 1px 7px;
+  border-radius: 4px;
+  text-transform: uppercase;
+}
+
+.finding.danger .sev-label { color: #200; background: var(--danger); }
+.finding.warning .sev-label { color: #201400; background: var(--warning); }
+.finding.info .sev-label { color: #001820; background: var(--info); }
+
+.finding-message {
+  margin: 0;
+  font-size: 0.86rem;
+  color: var(--text);
+  opacity: 0.92;
+}
+
+.no-findings-note {
+  padding: 14px 16px;
+  font-size: 0.86rem;
+  color: var(--ok);
+  background: var(--ok-bg);
+  border-top: 1px solid var(--panel-border-soft);
+}
+
+.no-findings-note small {
+  display: block;
+  margin-top: 4px;
+  color: var(--text-muted);
+  font-weight: 400;
+}
+
+.verify-select {
+  padding: 14px 16px;
+  border-top: 1px solid var(--panel-border-soft);
+  background: var(--bg-elevated);
+}
+
+.verify-select-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+  margin-bottom: 8px;
+}
+
+.verify-select-label {
+  font-size: 0.78rem;
+  font-weight: 700;
+  color: var(--text-muted);
+  text-transform: uppercase;
+  letter-spacing: 0.03em;
+}
+
+.verify-select pre {
+  margin: 0;
+  padding: 10px 12px;
+  background: var(--bg);
+  border: 1px solid var(--panel-border);
+  border-radius: 6px;
+  font-family: var(--font-mono);
+  font-size: 0.82rem;
+  color: var(--accent-strong);
+  overflow-x: auto;
+  white-space: pre-wrap;
+  word-break: break-word;
+}
+
+/* ---------- About / disclaimer ---------- */
+
+.about-panel {
+  padding: 4px 4px 28px;
+  color: var(--text-muted);
+  font-size: 0.9rem;
+}
+
+.about-panel h2 {
+  color: var(--text);
+  font-size: 1.05rem;
+  margin-bottom: 10px;
+}
+
+.disclaimer {
+  margin-top: 14px;
+  padding: 12px 14px;
+  border: 1px solid var(--panel-border);
+  border-radius: 8px;
+  background: var(--bg-elevated);
+  font-size: 0.85rem;
+}
+
+/* ---------- チームCTA ---------- */
+
+.team-cta {
+  border: 1px dashed var(--panel-border);
+  border-radius: var(--radius);
+  padding: 20px;
+  margin-bottom: 32px;
+  background: var(--bg-elevated);
+}
+
+.team-cta h2 {
+  margin-top: 0;
+  font-size: 1rem;
+}
+
+.team-cta p {
+  color: var(--text-muted);
+  font-size: 0.88rem;
+}
+
+.cta-form {
+  display: flex;
+  gap: 10px;
+  flex-wrap: wrap;
+  margin-top: 14px;
+}
+
+.cta-form input[type="email"] {
+  flex: 1 1 240px;
+  min-width: 0;
+  background: var(--panel);
+  border: 1px solid var(--panel-border);
+  border-radius: 7px;
+  padding: 9px 12px;
+  color: var(--text);
+  font-family: inherit;
+  font-size: 0.88rem;
+}
+
+/* ---------- フッター ---------- */
+
+.site-footer {
+  border-top: 1px solid var(--panel-border-soft);
+  padding: 18px 0 32px;
+  color: var(--text-faint);
+  font-size: 0.78rem;
+}
+
+/* ---------- レスポンシブ ---------- */
+
+@media (max-width: 600px) {
+  .container {
+    padding: 0 14px;
+  }
+
+  .brand-name {
+    font-size: 1.15rem;
+  }
+
+  .panel {
+    padding: 14px;
+  }
+
+  .input-panel-actions {
+    flex-direction: column;
+    align-items: stretch;
+  }
+
+  .input-panel-actions .btn {
+    width: 100%;
+  }
+
+  .stmt-card-head {
+    flex-direction: column;
+    align-items: flex-start;
+  }
+
+  .verify-select-head {
+    flex-direction: column;
+    align-items: flex-start;
+  }
+}
+
+/* ライトモード環境でも最低限読めるように（基本はダーク運用想定） */
+@media (prefers-color-scheme: light) {
+  :root {
+    color-scheme: dark;
+  }
+}

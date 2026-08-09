@@ -1,0 +1,107 @@
+<!DOCTYPE html>
+<html lang="ja">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>SQLMegane（SQLめがね） - 実行前のSQLを、もう一度よく見る</title>
+<meta name="description" content="本番DBにSQLを流す前に、危険な箇所をブラウザだけでチェックする試作ツール「SQLMegane（SQLめがね）」。インストール不要、SQLは外部送信されません。">
+<meta http-equiv="Content-Security-Policy" content="default-src 'self'; script-src 'self'; style-src 'self'; connect-src 'none'; form-action 'none'">
+<link rel="stylesheet" href="css/style.css">
+</head>
+<body>
+<header class="site-header">
+  <div class="container header-inner">
+    <div class="brand">
+      <span class="brand-mark" aria-hidden="true">👓</span>
+      <div>
+        <h1 class="brand-name">SQLMegane <span class="brand-suffix">SQLめがね</span></h1>
+        <p class="brand-tagline">本番SQLを流す前に、危険な箇所をその場でチェック</p>
+      </div>
+    </div>
+    <span class="badge badge-proto">試作品（プロトタイプ）</span>
+  </div>
+</header>
+
+<main class="container">
+
+  <section class="privacy-banner" aria-label="プライバシーについて">
+    <span class="privacy-icon" aria-hidden="true">🔒</span>
+    <p>入力されたSQLは<strong>ブラウザ内でのみ処理</strong>され、外部へ一切送信されません。サーバーもインストールも不要です。</p>
+  </section>
+
+  <section class="panel input-panel">
+    <div class="input-panel-head">
+      <label for="sql-input" class="panel-title">チェックしたいSQLを貼り付け</label>
+      <div class="dialect-select-wrap">
+        <label for="dialect-select">方言</label>
+        <select id="dialect-select">
+          <option value="generic">汎用</option>
+          <option value="oracle">Oracle</option>
+          <option value="mssql">SQL Server</option>
+          <option value="mysql">MySQL</option>
+          <option value="postgres">PostgreSQL</option>
+        </select>
+      </div>
+    </div>
+
+    <textarea
+      id="sql-input"
+      class="sql-textarea"
+      spellcheck="false"
+      autocomplete="off"
+      autocapitalize="off"
+      placeholder="例: UPDATE orders SET status = 'shipped' WHERE id = 42;&#10;&#10;複数文をまとめて貼り付け可能です（セミコロン区切り）。"
+    ></textarea>
+
+    <div class="input-panel-actions">
+      <button id="analyze-btn" type="button" class="btn btn-primary">解析する</button>
+      <button id="clear-btn" type="button" class="btn btn-ghost">クリア</button>
+      <span id="auto-analyze-hint" class="hint">入力中も自動でチェックします</span>
+    </div>
+  </section>
+
+  <section id="results" class="results" aria-live="polite">
+    <p class="empty-state">SQLを貼り付けると、ここに解析結果が表示されます。</p>
+  </section>
+
+  <section class="about-panel">
+    <h2>これは何？</h2>
+    <p>
+      本番データベースに手作業でUPDATE/DELETEを実行する前に、SQLを貼り付けるだけで
+      「WHERE句の抜け」「常に真になる条件」「範囲が広がりやすいOR/LIKE」などの
+      定番の事故パターンを検出する試作ツールです。組織への導入やアカウント登録は不要で、
+      このページを開くだけで使えます。
+    </p>
+    <p class="disclaimer">
+      これは需要検証のための<strong>試作品（プロトタイプ）</strong>です。検出は正規表現ベースのヒューリスティックであり、
+      本格的なSQLパーサではありません。<strong>「危険が検出されない = 安全」ではありません。</strong>
+      最終判断は必ず人間が行い、可能な限り検算SELECTやステージング環境での確認を併用してください。
+    </p>
+  </section>
+
+  <section class="team-cta">
+    <h2>チーム版に興味はありますか？</h2>
+    <p>
+      CI/CD連携によるプルリクエスト時の自動チェック、ルールのカスタマイズ、
+      レビュー履歴の保存・共有など、チーム運用向けの機能を検討しています。
+      興味があればメールアドレスを登録してください（<strong>現在は準備中で、実際の送信・登録は行われません</strong>）。
+    </p>
+    <form id="cta-form" class="cta-form">
+      <label for="cta-email" class="sr-only">メールアドレス</label>
+      <input id="cta-email" type="email" placeholder="you@example.com" disabled>
+      <button type="button" class="btn btn-primary" disabled>登録する（準備中）</button>
+    </form>
+  </section>
+
+</main>
+
+<footer class="site-footer">
+  <div class="container">
+    <p>SQLMegane（SQLめがね）は需要検証中のプロトタイプです。データの保存・送信は行われません。すべての処理はこの端末のブラウザ内で完結します。</p>
+  </div>
+</footer>
+
+<script src="js/analyzer.js"></script>
+<script src="js/app.js"></script>
+</body>
+</html>
