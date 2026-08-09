@@ -571,11 +571,12 @@ test('index.htmlはCSP metaタグを持ち、想定のディレクティブを�
   assert.match(csp, /form-action 'none'/);
 });
 
-test('index.htmlのCTAフォームはidを持ち、app.js側でsubmitを防止している', () => {
+test('index.htmlはCTAフォームを持たず、GitHub IssueへのリンクをCTAとして持つ', () => {
   const html = readProjectFile('index.html');
-  assert.match(html, /<form id="cta-form" class="cta-form">/);
+  assert.ok(!/<form/.test(html), 'CTA用のformが残っています');
+  assert.match(html, /<a class="btn btn-primary cta-issue-link" href="https:\/\/github\.com\/selene-nyx-ai\/sqlmegane\/issues" target="_blank" rel="noopener">/);
   const appJs = readProjectFile('js/app.js');
-  assert.match(appJs, /ctaForm[\s\S]*addEventListener\('submit'/);
+  assert.ok(!/ctaForm/.test(appJs), 'app.jsにctaFormへの参照が残っています');
 });
 
 // ---------------------------------------------------------------------------

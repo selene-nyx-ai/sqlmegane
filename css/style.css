@@ -531,23 +531,10 @@ body {
   font-size: 0.88rem;
 }
 
-.cta-form {
-  display: flex;
-  gap: 10px;
-  flex-wrap: wrap;
-  margin-top: 14px;
-}
-
-.cta-form input[type="email"] {
-  flex: 1 1 240px;
-  min-width: 0;
-  background: var(--panel);
-  border: 1px solid var(--panel-border);
-  border-radius: 7px;
-  padding: 9px 12px;
-  color: var(--text);
-  font-family: inherit;
-  font-size: 0.88rem;
+.cta-issue-link {
+  display: inline-block;
+  margin-top: 6px;
+  text-decoration: none;
 }
 
 /* ---------- フッター ---------- */

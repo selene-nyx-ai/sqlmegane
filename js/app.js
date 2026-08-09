@@ -16,7 +16,6 @@ const els = {
   analyzeBtn: document.getElementById('analyze-btn'),
   clearBtn: document.getElementById('clear-btn'),
   results: document.getElementById('results'),
-  ctaForm: document.getElementById('cta-form'),
 };
 
 const KIND_LABELS = {
@@ -208,14 +207,5 @@ els.clearBtn.addEventListener('click', () => {
   render();
   els.input.focus();
 });
-// CTA登録フォームは現在準備中で、input/buttonともdisabled。
-// インラインonsubmit属性はCSP(script-src 'self')で禁止しているため、
-// 万一の誤送信防止はここでリスナーとして持たせる。
-if (els.ctaForm) {
-  els.ctaForm.addEventListener('submit', (e) => {
-    e.preventDefault();
-  });
-}
-
 // 初期表示
 render();
