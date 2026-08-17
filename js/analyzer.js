@@ -710,6 +710,32 @@ function findTableExprRange(kind, masked, hasFromClause) {
   return { start: leadOffset + start, end: leadOffset + end };
 }
 
+// 検算SELECTがJOINを含む場合に付ける注記。
+// 1:N のJOINでは COUNT(*) が「結合後の行数」になり、更新・削除対象の行数
+// （例えば UPDATE の場合は users 側の行数）とは一致しないことがあるため、
+// 検算SELECTを鵜呑みにして「対象件数」だと誤解しないよう明示する。
+const VERIFY_SELECT_JOIN_NOTE = '※JOINを含むため結合行数です。1対多の結合では実際の更新行数より大きくなることがあります';
+
+/** 検算SELECTの文字列にJOINが含まれるかどうか（テーブル式部分にJOINキーワードが
+ *  現れるのは、ASTベースでJOIN込みのテーブル式をそのまま切り出したときだけ。
+ *  正規表現フォールバック版の buildVerifySelect は単一テーブル名しか含めないため
+ *  JOINキーワードは現れない）。 */
+function verifySelectHasJoin(sql) {
+  return !!sql && /\bJOIN\b/i.test(sql);
+}
+
+/**
+ * 生成した検算SELECTを最終形にする。JOINを含む場合は、件数が「結合行数」であり
+ * 更新・削除される行数そのものとは限らないことをSQLコメントとして明示する
+ * （UI側の表示ラベル・注記カードは app.js 側で hasJoin フラグを見て別途出す）。
+ */
+function finalizeVerifySelect(sql) {
+  if (!sql) return { sql: null, hasJoin: false };
+  const hasJoin = verifySelectHasJoin(sql);
+  if (!hasJoin) return { sql, hasJoin: false };
+  return { sql: `-- ${VERIFY_SELECT_JOIN_NOTE}\n${sql}`, hasJoin: true };
+}
+
 function buildVerifySelectFromAst(kind, ast, masked, plain, whereInfo) {
   const A = globalThis.SQLMeganeSqlAst;
   if (!A || !ast) return null;
@@ -766,6 +792,34 @@ function isMysqlMultiTableUpdate(masked) {
   return /\b(JOIN|INNER|LEFT|RIGHT|FULL|CROSS)\b/i.test(head);
 }
 
+/** MySQLのマルチテーブルDELETE（`DELETE a FROM a JOIN b ...` / `DELETE FROM a, b USING ...`）かどうか。
+ *  MySQLではこの形のDELETEにもLIMITを付けられないため、mysql-no-limitの対象から除外する
+ *  （UPDATEは isMysqlMultiTableUpdate で対応済みだったが、DELETEが漏れていたための追加）。 */
+function isMysqlMultiTableDelete(masked) {
+  const bodyStart = findCteBodyStart(masked);
+  const s = masked.slice(bodyStart).replace(/^\s+/, '');
+  const m = s.match(/^DELETE\s+/i);
+  if (!m) return false;
+  const rest = s.slice(m[0].length);
+
+  const fromHit = topLevelSearch(rest, ['FROM'], 0);
+  if (!fromHit) return false;
+
+  // `DELETE a, b FROM ...` / `DELETE a FROM a JOIN b ...` のように FROM の前に
+  // テーブル（別名）指定があれば、それだけでマルチテーブル DELETE と判断できる。
+  const beforeFrom = rest.slice(0, fromHit.index).trim();
+  if (beforeFrom.length > 0) return true;
+
+  // `DELETE FROM a, b USING ...` / `DELETE FROM a JOIN b ... WHERE ...` のように
+  // FROM の後ろ（WHERE 等の前まで）にカンマ区切りや JOIN/USING があるかを見る。
+  const after = rest.slice(fromHit.index + fromHit.length);
+  const endWords = ['WHERE'].concat(WHERE_END_WORDS);
+  const e = topLevelSearchValidated(after, endWords, 0, isValidWhereEndMatch);
+  const head = e ? after.slice(0, e.index) : after;
+  if (/,/.test(head)) return true;
+  return /\b(JOIN|INNER|LEFT|RIGHT|FULL|CROSS|USING)\b/i.test(head);
+}
+
 /** WHERE句が「単一カラム = 単一値」のような単純な等価条件だけかどうか
  *  （主キー1行更新のような、対象件数の見積もりに自信が持てるケース）。
  *  括弧・AND・OR・他の演算子が絡む場合は対象外（false）とし、安全側に倒す。 */
@@ -803,7 +857,7 @@ function analyzeStatement(rawStmt, dialect) {
   const AstRules = globalThis.SQLMeganeAstRules;
   const Summarizer = globalThis.SQLMeganeSummarizer;
 
-  const parse = { mode: 'regex-only', error: null, parserDialect: null, usedFallbackDialect: null };
+  const parse = { mode: 'regex-only', error: null, parserDialect: null, usedFallbackDialect: null, primaryError: null };
   let ast = null;
 
   if (Ast && Ast.isAvailable(dialect)) {
@@ -813,6 +867,10 @@ function analyzeStatement(rawStmt, dialect) {
       parse.mode = 'ast';
       parse.parserDialect = result.parserDialect;
       parse.usedFallbackDialect = result.usedFallbackDialect;
+      // 別方言（mysql）で再挑戦して成功した場合、選択方言では構文エラーだった
+      // という事実を失わずに持ち帰る。UIはこれを「参考表示」ではなく警告として
+      // 明示する（選択方言ではこのSQLは実行できない可能性があるため）。
+      parse.primaryError = result.primaryError || null;
     } else {
       parse.mode = 'fallback';
       parse.error = result.error;
@@ -829,13 +887,24 @@ function analyzeStatement(rawStmt, dialect) {
 
   if (astRulesUsable) {
     const findings = AstRules.analyzeAst(ast, kind, dialect);
-    let verifySelect = null;
+    let verifySelectRaw = null;
     if (kind === 'UPDATE' || kind === 'DELETE') {
-      verifySelect = buildVerifySelectFromAst(kind, ast, masked, plain, whereInfo)
+      verifySelectRaw = buildVerifySelectFromAst(kind, ast, masked, plain, whereInfo)
         || buildVerifySelect(kind, masked, whereInfo);
     }
+    const finalizedVerify = finalizeVerifySelect(verifySelectRaw);
     findings.sort((a, b) => SEVERITY_ORDER[a.severity] - SEVERITY_ORDER[b.severity]);
-    return { kind, findings, verifySelect, masked, plain, summary, parse, ast };
+    return {
+      kind,
+      findings,
+      verifySelect: finalizedVerify.sql,
+      verifySelectHasJoin: finalizedVerify.hasJoin,
+      masked,
+      plain,
+      summary,
+      parse,
+      ast,
+    };
   }
 
   return analyzeStatementByRegex(rawStmt, dialect, { plain, masked, kind, whereInfo, summary, parse, ast });
@@ -923,7 +992,8 @@ function analyzeStatementByRegex(rawStmt, dialect, ctx) {
       // そもそもLIMITに対応していないため出さない。
       const singleEquality = isSingleEqualityWhere(whereInfo.maskedClause);
       const multiTableUpdate = kind === 'UPDATE' && isMysqlMultiTableUpdate(masked);
-      if (!singleEquality && !multiTableUpdate) {
+      const multiTableDelete = kind === 'DELETE' && isMysqlMultiTableDelete(masked);
+      if (!singleEquality && !multiTableUpdate && !multiTableDelete) {
         findings.push(mk(
           'info',
           'mysql-no-limit',
@@ -959,21 +1029,23 @@ function analyzeStatementByRegex(rawStmt, dialect, ctx) {
     ));
   }
 
-  let verifySelect = null;
+  let verifySelectRaw = null;
   if (kind === 'UPDATE' || kind === 'DELETE') {
-    verifySelect = buildVerifySelect(kind, masked, whereInfo);
+    verifySelectRaw = buildVerifySelect(kind, masked, whereInfo);
   }
+  const finalizedVerify = finalizeVerifySelect(verifySelectRaw);
 
   findings.sort((a, b) => SEVERITY_ORDER[a.severity] - SEVERITY_ORDER[b.severity]);
 
   return {
     kind,
     findings,
-    verifySelect,
+    verifySelect: finalizedVerify.sql,
+    verifySelectHasJoin: finalizedVerify.hasJoin,
     masked,
     plain,
     summary: ctx.summary || null,
-    parse: ctx.parse || { mode: 'regex-only', error: null, parserDialect: null, usedFallbackDialect: null },
+    parse: ctx.parse || { mode: 'regex-only', error: null, parserDialect: null, usedFallbackDialect: null, primaryError: null },
     ast: ctx.ast || null,
   };
 }
@@ -1095,7 +1167,13 @@ function analyzeSQL(fullText, dialect) {
     }
     if (DML_KINDS.has(kind)) sawDmlInBatch = true;
 
-    if (d === 'postgres' && (kind === 'UPDATE' || kind === 'DELETE') && !hasTopLevelWord(result.masked, 'RETURNING', 0)) {
+    // usedFallbackDialect が付いている（＝選択方言では構文エラーで、別方言=mysqlの
+    // パーサで再挑戦して通った）場合は出さない。選択方言（PostgreSQL）ではそもそも
+    // このSQLは構文的に成立していないため、PostgreSQL固有のTipsを添えるのは
+    // 誤解を招く（「この形で実行できる」と誤解される）ため。
+    const usedFallbackDialect = !!(result.parse && result.parse.usedFallbackDialect);
+    if (d === 'postgres' && (kind === 'UPDATE' || kind === 'DELETE') && !usedFallbackDialect
+        && !hasTopLevelWord(result.masked, 'RETURNING', 0)) {
       findings.push(mk(
         'info',
         'postgres-returning-tip',
@@ -1112,6 +1190,11 @@ function analyzeSQL(fullText, dialect) {
     if (parse && parse.error && parse.error.line != null) {
       parse.error.globalLine = lineNumberAt(text, entry.start) + (parse.error.line - 1);
     }
+    // 別方言（mysql）で再挑戦して成功したときの「選択方言では構文エラーだった」
+    // 位置も同様に全体テキストでの行番号へ変換する（UIの警告表示用）。
+    if (parse && parse.primaryError && parse.primaryError.line != null) {
+      parse.primaryError.globalLine = lineNumberAt(text, entry.start) + (parse.primaryError.line - 1);
+    }
 
     statements.push({
       number: idx + 1,
@@ -1119,6 +1202,7 @@ function analyzeSQL(fullText, dialect) {
       kind,
       findings,
       verifySelect: result.verifySelect,
+      verifySelectHasJoin: !!result.verifySelectHasJoin,
       summary: result.summary,
       parse,
       tables: collectTables(result),
@@ -1185,6 +1269,7 @@ const _internal = {
   buildVerifySelect,
   isSingleEqualityWhere,
   isMysqlMultiTableUpdate,
+  isMysqlMultiTableDelete,
   updateHasJoin,
   splitStatementsWithOffsets,
   lineNumberAt,

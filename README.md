@@ -61,16 +61,16 @@ v2 から、MySQL / PostgreSQL / SQL Server については本物のSQLパーサ
 | danger | `no-where-update` | WHERE句のないUPDATE（`UPDATE ... JOIN ...` の形の場合は「JOINで一致した行がすべて更新されます」という文言に変わります） |
 | danger | `no-where-delete` | WHERE句のないDELETE（`WITH ... AS (...)` のCTEプレフィックスがあっても本体のDELETEを判定します） |
 | danger | `always-true-where` | 常に真になるWHERE句（`1=1`、`'a'='a'` など。`1=1 AND 実条件` のように他の条件と組み合わさっている場合は対象外。ただし `id=42 OR 1=1` のように**トップレベルのOR**でつながっている場合は検出します。括弧の中の `OR 1=1`（例: `a=1 AND (b=2 OR 1=1)`）は全行に波及しないため対象外） |
-| danger | `left-join-where-cancellation` | **（AST時のみ）** LEFT/RIGHT/FULL JOIN した外側テーブルの列を、WHERE句のトップレベルANDで等値絞り込みしている（NULL行が必ず除外されるため実質INNER JOIN化し、外部結合の意味が失われる）。`IS NULL` / `IS NOT NULL` は意図的な書き方なので対象外、ORの下にある条件も対象外 |
+| danger | `left-join-where-cancellation` | **（AST時のみ）** LEFT/RIGHT/FULL JOIN した外側テーブルの列を、WHERE句のトップレベルANDで等値絞り込みしている（NULL行が必ず除外されるため実質INNER JOIN化し、外部結合の意味が失われる）。`IS NOT NULL` はまさにこの打ち消しそのものなので検出対象、`IS NULL`（アンチジョイン等の意図的な書き方）は対象外。ORの下にある条件は対象外。括弧で括られたANDグループ（例: `(a AND b) AND c`）の中の条件も、括弧の外にORが無ければ検出対象に含めます |
 | danger | `truncate-table` | TRUNCATE TABLE |
 | danger | `drop-table` | DROP TABLE |
 | danger | `drop-database` | DROP DATABASE |
 | warning | `or-no-parens` | WHERE句がOR結合かつ括弧なし（`a=1 OR b=2 AND c=3` のような意図しない範囲拡大。`BETWEEN x AND y` のANDは演算子優先順位の対象外として除外） |
-| warning | `not-in-null-risk` | **（AST時のみ）** `NOT IN (SELECT ...)` を使っている（サブクエリ結果にNULLが1件でもあると全行が除外される）。`NOT EXISTS` の使用を促します。値リストの `NOT IN (1,2,3)` は対象外 |
+| warning / danger | `not-in-null-risk` | **（AST時のみ）** `NOT IN (SELECT ...)` を使っている場合はwarning（サブクエリ結果にNULLが1件でもあると全行が除外される。`NOT EXISTS` の使用を促します）。`NOT IN (1, NULL, 3)` のように値リストに直接NULLが含まれる場合はdanger（三値論理により結果が常に空になることが実行前から確定しているため）。NULLを含まない値リスト `NOT IN (1,2,3)` は対象外 |
 | warning | `like-leading-wildcard` | `LIKE '%...'` のような前方一致でないLIKE（対象が広がりやすい） |
 | warning | `self-subquery-no-condition` | `IN (SELECT ... FROM 同じテーブル)` で、サブクエリ側に絞り込み条件（WHERE）がない（相関ミスの定番） |
 | warning | `implicit-conversion` | `id = '123'` のような引用符付き数値リテラルの比較（暗黙型変換によりインデックスが効かない/意図しない一致の懸念） |
-| info (MySQL) | `mysql-no-limit` | UPDATE/DELETEにLIMITがない（主キー1行更新のような単純な等価WHEREのみの場合、およびLIMITに対応しないマルチテーブルUPDATEの場合は出しません） |
+| info (MySQL) | `mysql-no-limit` | UPDATE/DELETEにLIMITがない（主キー1行更新のような単純な等価WHEREのみの場合、およびLIMITに対応しないマルチテーブルUPDATE・マルチテーブルDELETE（`DELETE a FROM a JOIN b ...` 等）の場合は出しません） |
 | warning (SQL Server, 複数文全体) | `mssql-multi-no-begintran` | 複数のUPDATE/DELETEがBEGIN TRANで囲まれていない（BEGIN TRANが破壊的文より後ろにしかない場合は「囲まれていない」扱いにします） |
 | warning (Oracle) | `oracle-ddl-autocommit` | DML実行後にDDL（CREATE/ALTER/DROP/TRUNCATE）が混在（Oracleでは暗黙コミットが発生） |
 | info (PostgreSQL) | `postgres-returning-tip` | UPDATE/DELETEにRETURNING句がない（付けると変更行を確認できる、というヒント） |
@@ -90,6 +90,16 @@ v2 から、MySQL / PostgreSQL / SQL Server については本物のSQLパーサ
 検算SELECTも、構文解析に成功した場合はASTで判断した「行の供給元（FROM句相当）」から生成します。
 これにより `UPDATE u SET ... FROM users u LEFT JOIN depts d ON ... WHERE ...`（T-SQL）や
 `UPDATE t1 LEFT JOIN t2 ON ... SET ...`（MySQL）でも、JOINを落とさない実行可能な検算SELECTになります。
+ただし検算SELECTがJOINを含む場合、`COUNT(*)` が返すのは**結合後の行数**であり、
+1対多のJOINでは実際にUPDATE/DELETEされる行数（例: `UPDATE users u JOIN orders o ON ...` なら
+`users` 側の行数）より大きくなることがあります。この場合は生成SQLに注記コメントを付け、
+ラベルとカード内の注記でも「結合行数である」ことを明示します。
+
+選択した方言のパーサでは構文エラーになったSQLでも、`WITH ... DELETE` のような既知のパーサの
+穴を吸収するため、MySQLパーサでもう一度だけ解析を試みることがあります。この再挑戦が成功した
+場合は「選択した方言（例: PostgreSQL）では構文エラーである」事実を警告として必ず表示します
+（位置つき）。このケースでは選択方言固有のTips（例: PostgreSQLのRETURNING案内）は出しません。
+選択方言では実行できない可能性があるSQLだと分かった上で参考にしてください。
 
 ## 検出しなかった/見送ったルール
 

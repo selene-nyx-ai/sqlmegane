@@ -474,6 +474,13 @@ body {
   letter-spacing: 0.03em;
 }
 
+.verify-select-note {
+  margin: 0 0 8px;
+  font-size: 0.78rem;
+  line-height: 1.7;
+  color: var(--warning);
+}
+
 .verify-select pre {
   margin: 0;
   padding: 10px 12px;
@@ -678,7 +685,19 @@ body {
   white-space: nowrap;
 }
 
-.parse-notice-soft { background: rgba(92, 200, 255, 0.06); }
+/* 別方言（mysql）で再挑戦して解析した結果を「選択方言では構文エラー」とはっきり
+   伝えるための警告色の注記（review指摘M2: 「参考」程度の軽い扱いだと、選択方言
+   では実行できないSQLをあたかも正常に解析できたかのように見せてしまうため）。 */
+.parse-notice-warning {
+  color: var(--warning);
+  background: var(--warning-bg);
+  border-bottom-color: var(--warning-border);
+}
+
+.parse-notice-warning .parse-notice-badge {
+  color: var(--warning);
+  border-color: var(--warning-border);
+}
 
 .stmt-summary {
   padding: 14px 16px;

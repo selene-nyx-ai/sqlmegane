@@ -127,14 +127,28 @@ async function copyToClipboard(text, btn) {
   }
 }
 
-function renderVerifySelect(sql) {
+/**
+ * 検算SELECTのカード。JOINを含む場合（hasJoin）は、表示件数が「結合行数」であり
+ * 1対多のJOINでは実際の更新・削除対象の行数より大きくなりうることを、ラベルと
+ * 注記の両方で明示する（生成SQL自体にも同内容のコメントが入っている）。
+ */
+function renderVerifySelect(sql, hasJoin) {
   const wrap = el('div', { className: 'verify-select' });
   const head = el('div', { className: 'verify-select-head' });
-  head.appendChild(el('span', { className: 'verify-select-label', text: '検算SELECT（実行前に対象件数を確認）' }));
+  const labelText = hasJoin
+    ? '検算SELECT（実行前に対象件数を確認・JOINのため結合行数です）'
+    : '検算SELECT（実行前に対象件数を確認）';
+  head.appendChild(el('span', { className: 'verify-select-label', text: labelText }));
   const copyBtn = el('button', { className: 'btn btn-copy', text: 'コピー', attrs: { type: 'button' } });
   copyBtn.addEventListener('click', () => copyToClipboard(sql, copyBtn));
   head.appendChild(copyBtn);
   wrap.appendChild(head);
+  if (hasJoin) {
+    wrap.appendChild(el('p', {
+      className: 'verify-select-note',
+      text: '※JOINを含むため結合行数です。1対多の結合では実際の更新行数より大きくなることがあります。',
+    }));
+  }
   const pre = el('pre');
   pre.textContent = sql;
   wrap.appendChild(pre);
@@ -200,18 +214,27 @@ function renderFallbackNotice(parse) {
   return note;
 }
 
-/** 方言差を吸収するために別方言のパーサで解析したことを明示する */
-function renderParserSwapNotice(parse) {
-  const label = PARSER_LABELS[parse.parserDialect] || parse.parserDialect;
-  const note = el('div', { className: 'parse-notice parse-notice-soft' });
-  note.appendChild(el('span', { className: 'parse-notice-badge', text: '参考' }));
+/**
+ * 別方言（mysql）のパーサで再挑戦して解析に成功したことを明示する。
+ * 「参考表示」程度の軽い扱いにすると、選択方言では構文エラーになるSQLでも
+ * あたかも正常に解析できたかのように見えてしまうため、選択方言では構文エラー
+ * だったという事実を warning として必ず表示する（位置つき）。
+ */
+function renderParserSwapNotice(parse, dialect) {
+  const selectedLabel = DIALECT_LABELS[dialect] || dialect;
+  const fallbackLabel = PARSER_LABELS[parse.parserDialect] || parse.parserDialect;
+  const err = parse.primaryError;
+  const line = err && err.globalLine != null ? err.globalLine : (err ? err.line : null);
+  const where = line != null ? `（位置: 行${line}）` : '';
+  const note = el('div', { className: 'parse-notice parse-notice-warning' });
+  note.appendChild(el('span', { className: 'parse-notice-badge', text: '⚠ 方言不一致' }));
   note.appendChild(el('span', {
-    text: `選択中の方言のパーサでは解析できなかったため、${label} のパーサで解析した結果を表示しています。`,
+    text: `選択した方言（${selectedLabel}）では構文エラーです${where}。別方言（${fallbackLabel}）として解釈した参考表示です。このSQLは選択した方言では実行できない可能性があります。`,
   }));
   return note;
 }
 
-function renderStatementCard(stmt) {
+function renderStatementCard(stmt, dialect) {
   const card = el('div', { className: 'stmt-card', attrs: { id: `stmt-${stmt.number}` } });
 
   const headRow = el('div', { className: 'stmt-card-head' });
@@ -229,7 +252,7 @@ function renderStatementCard(stmt) {
   if (stmt.parse && stmt.parse.mode === 'fallback') {
     card.appendChild(renderFallbackNotice(stmt.parse));
   } else if (stmt.parse && stmt.parse.usedFallbackDialect) {
-    card.appendChild(renderParserSwapNotice(stmt.parse));
+    card.appendChild(renderParserSwapNotice(stmt.parse, dialect));
   }
 
   if (stmt.summary) {
@@ -249,7 +272,7 @@ function renderStatementCard(stmt) {
   }
 
   if (stmt.verifySelect) {
-    card.appendChild(renderVerifySelect(stmt.verifySelect));
+    card.appendChild(renderVerifySelect(stmt.verifySelect, !!stmt.verifySelectHasJoin));
   }
 
   return card;
@@ -376,7 +399,7 @@ function render() {
   if (globalNode) els.results.appendChild(globalNode);
 
   for (const stmt of result.statements) {
-    els.results.appendChild(renderStatementCard(stmt));
+    els.results.appendChild(renderStatementCard(stmt, result.dialect));
   }
 }
 

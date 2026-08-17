@@ -159,15 +159,31 @@ function findUncorrelatedSelfSubquery(ast, targetTables) {
 // 新ルール: NOT IN (SELECT ...) のNULLリスク
 // ---------------------------------------------------------------------------
 
+/**
+ * NOT IN のNULLリスクを2パターン検出する:
+ *  - kind: 'subquery'     … NOT IN (SELECT ...)。サブクエリの結果にNULLが混じるかは
+ *                            実行してみないと分からないため warning（要確認）。
+ *  - kind: 'literal-null' … NOT IN (1, NULL, 3) のようにリテラルの値リストに直接NULLが
+ *                            含まれる。これは実行前から確実に分かる（SQLの三値論理により
+ *                            比較結果が常にUNKNOWNになり、WHERE句は常に空を返す）ため
+ *                            danger扱いにする。
+ */
 function findNotInSubqueries(ast) {
   const hits = [];
   A.walkExpr(ast, (node) => {
     if (node.type !== 'binary_expr') return;
     if (String(node.operator).toUpperCase() !== 'NOT IN') return;
-    const sub = A.subqueryOf(node.right);
-    if (!sub) return;
     const ref = A.columnRef(node.left);
-    hits.push({ column: ref ? ref.text : null });
+    const column = ref ? ref.text : null;
+    const sub = A.subqueryOf(node.right);
+    if (sub) {
+      hits.push({ column, kind: 'subquery' });
+      return;
+    }
+    if (node.right && node.right.type === 'expr_list' && Array.isArray(node.right.value)) {
+      const hasNull = node.right.value.some((v) => v && v.type === 'null');
+      if (hasNull) hits.push({ column, kind: 'literal-null' });
+    }
   });
   return hits;
 }
@@ -194,17 +210,25 @@ function findOuterJoinCancellation(ast) {
   for (const part of A.topLevelAndParts(ast.where)) {
     if (!part || part.type !== 'binary_expr') continue;
     const op = String(part.operator || '').toUpperCase();
-    if (!COMPARISON_OPS.has(op)) continue;
+    // IS NOT NULL はまさに外部結合の打ち消し（NULL埋めされた行を除外する）そのものなので
+    // 対象に含める。IS NULL（アンチジョイン等の意図的な書き方）は引き続き対象外。
+    const isNotNull = op === 'IS NOT' && part.right && part.right.type === 'null';
+    if (!COMPARISON_OPS.has(op) && !isNotNull) continue;
     for (const side of [part.left, part.right]) {
       const ref = A.columnRef(side);
       if (!ref || !ref.table) continue;
-      if (!nullable.has(lower(ref.table))) continue;
-      const entry = A.aliasMap(rowSource).get(lower(ref.table));
+      const key = lower(ref.table);
+      if (!nullable.has(key)) continue;
+      const entry = A.aliasMap(rowSource).get(key);
       hits.push({
         column: ref.text,
         table: entry ? entry.table : ref.table,
         alias: entry ? (entry.as || null) : null,
-        joinKind: entry ? A.joinKind(entry) : null,
+        // nullable.get(key) は「この参照をNULL埋め対象にした実際のJOIN種別」。
+        // entry（rowSource中の自分自身のエントリ）の .join を見ると、RIGHT JOINで
+        // NULL埋めされる側（先頭のFROMテーブルなど）では常にnullになってしまうため、
+        // 必ず nullableTableKeys() が返す「原因のJOIN種別」を使う。
+        joinKind: nullable.get(key),
         operator: part.operator,
       });
     }
@@ -328,7 +352,11 @@ function analyzeAst(ast, kind, dialect) {
     }
 
     if (dialect === 'mysql' && !hasLimit(ast)) {
-      if (!isSingleEqualityWhere(ast.where) && !(kind === 'UPDATE' && isMultiTableStatement(ast))) {
+      // MySQLの複数テーブルUPDATE（`UPDATE t1, t2 SET ...` / `UPDATE t1 JOIN t2 ... SET ...`）だけでなく
+      // 複数テーブルDELETE（`DELETE a FROM a JOIN b ... WHERE ...`）もLIMITを付けると構文エラーになるため、
+      // どちらも対象から除外する。
+      const multiTableStatement = (kind === 'UPDATE' || kind === 'DELETE') && isMultiTableStatement(ast);
+      if (!isSingleEqualityWhere(ast.where) && !multiTableStatement) {
         findings.push(mk(
           'info',
           'mysql-no-limit',
@@ -354,8 +382,19 @@ function analyzeAst(ast, kind, dialect) {
   }
 
   const notIns = findNotInSubqueries(ast);
-  if (notIns.length > 0) {
-    const col = notIns[0].column ? `${q(notIns[0].column)} の ` : '';
+  const notInLiteralNull = notIns.find((h) => h.kind === 'literal-null');
+  const notInSubquery = notIns.find((h) => h.kind === 'subquery');
+  if (notInLiteralNull) {
+    const col = notInLiteralNull.column ? `${q(notInLiteralNull.column)} の ` : '';
+    findings.push(mk(
+      'danger',
+      'not-in-null-risk',
+      'NOT IN リストにNULLが含まれています',
+      `${col}NOT IN (...) の値リストにNULLが含まれています。SQLの三値論理により、リストに1件でもNULLがあると比較結果はすべて UNKNOWN になり、NULLが含まれるため結果は常に空です（この条件は1行もヒットしません）。意図した値だけを残すか、リストからNULLを取り除いてください。`
+    ));
+  }
+  if (notInSubquery) {
+    const col = notInSubquery.column ? `${q(notInSubquery.column)} の ` : '';
     findings.push(mk(
       'warning',
       'not-in-null-risk',

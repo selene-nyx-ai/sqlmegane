@@ -943,25 +943,48 @@ test("AST版: 文字列リテラル内の 'WHERE' に釣られない（回帰確
 // v2: AST基盤の検算SELECT生成
 // ---------------------------------------------------------------------------
 
-test('検算SELECT: T-SQLの UPDATE ... FROM ... JOIN からJOIN込みで生成される', () => {
+test('検算SELECT: T-SQLの UPDATE ... FROM ... JOIN からJOIN込みで生成される（JOIN注記コメント付き）', () => {
   const s = firstStatement("UPDATE u SET u.flg = 1 FROM users u LEFT JOIN depts d ON u.dept_id = d.id WHERE d.code = 'A';", 'mssql');
-  assert.equal(s.verifySelect, "SELECT COUNT(*) FROM users u LEFT JOIN depts d ON u.dept_id = d.id WHERE d.code = 'A';");
+  assert.equal(
+    s.verifySelect,
+    "-- ※JOINを含むため結合行数です。1対多の結合では実際の更新行数より大きくなることがあります\n"
+      + "SELECT COUNT(*) FROM users u LEFT JOIN depts d ON u.dept_id = d.id WHERE d.code = 'A';"
+  );
+  assert.equal(s.verifySelectHasJoin, true);
 });
 
-test('検算SELECT: MySQLのマルチテーブルUPDATEでもJOINが落ちない', () => {
+test('検算SELECT: MySQLのマルチテーブルUPDATEでもJOINが落ちない（JOIN注記コメント付き）', () => {
   const s = firstStatement('UPDATE t1 LEFT JOIN t2 ON t1.id = t2.id SET t1.x = 1 WHERE t2.y = 2;', 'mysql');
-  assert.equal(s.verifySelect, 'SELECT COUNT(*) FROM t1 LEFT JOIN t2 ON t1.id = t2.id WHERE t2.y = 2;');
+  assert.equal(
+    s.verifySelect,
+    "-- ※JOINを含むため結合行数です。1対多の結合では実際の更新行数より大きくなることがあります\n"
+      + "SELECT COUNT(*) FROM t1 LEFT JOIN t2 ON t1.id = t2.id WHERE t2.y = 2;"
+  );
+  assert.equal(s.verifySelectHasJoin, true);
 });
 
-test('検算SELECT: DELETE ... FROM ... JOIN でもJOINが落ちない', () => {
+test('検算SELECT: DELETE ... FROM ... JOIN でもJOINが落ちない（JOIN注記コメント付き）', () => {
   const s = firstStatement('DELETE o FROM orders o JOIN customers c ON o.customer_id = c.id WHERE c.id = 3;', 'mysql');
-  assert.equal(s.verifySelect, 'SELECT COUNT(*) FROM orders o JOIN customers c ON o.customer_id = c.id WHERE c.id = 3;');
+  assert.equal(
+    s.verifySelect,
+    "-- ※JOINを含むため結合行数です。1対多の結合では実際の更新行数より大きくなることがあります\n"
+      + "SELECT COUNT(*) FROM orders o JOIN customers c ON o.customer_id = c.id WHERE c.id = 3;"
+  );
+  assert.equal(s.verifySelectHasJoin, true);
 });
 
-test('検算SELECT: 単純なUPDATE/DELETEでは従来と同じ文字列のまま（回帰確認）', () => {
-  assert.equal(firstStatement('UPDATE orders SET status = 1 WHERE id = 42;', 'mysql').verifySelect, 'SELECT COUNT(*) FROM orders WHERE id = 42;');
-  assert.equal(firstStatement('DELETE FROM orders o WHERE o.id = 7;', 'mysql').verifySelect, 'SELECT COUNT(*) FROM orders o WHERE o.id = 7;');
-  assert.equal(firstStatement('UPDATE orders SET status = 1;', 'mysql').verifySelect, 'SELECT COUNT(*) FROM orders;');
+test('検算SELECT: 単純なUPDATE/DELETEでは従来と同じ文字列のまま（回帰確認、JOIN注記も付かない）', () => {
+  const s1 = firstStatement('UPDATE orders SET status = 1 WHERE id = 42;', 'mysql');
+  assert.equal(s1.verifySelect, 'SELECT COUNT(*) FROM orders WHERE id = 42;');
+  assert.equal(s1.verifySelectHasJoin, false);
+
+  const s2 = firstStatement('DELETE FROM orders o WHERE o.id = 7;', 'mysql');
+  assert.equal(s2.verifySelect, 'SELECT COUNT(*) FROM orders o WHERE o.id = 7;');
+  assert.equal(s2.verifySelectHasJoin, false);
+
+  const s3 = firstStatement('UPDATE orders SET status = 1;', 'mysql');
+  assert.equal(s3.verifySelect, 'SELECT COUNT(*) FROM orders;');
+  assert.equal(s3.verifySelectHasJoin, false);
 });
 
 // ---------------------------------------------------------------------------
@@ -1052,6 +1075,162 @@ test('README.mdにv2の機能・方言ごとの解析レベル・Apache-2.0同�
   assert.match(readme, /left-join-where-cancellation/);
   assert.match(readme, /not-in-null-risk/);
   assert.match(readme, /簡易チェック/);
+});
+
+// ---------------------------------------------------------------------------
+// feature/ast-summary 別視点レビュー指摘（M1〜M3 + minor 1〜4）
+// ---------------------------------------------------------------------------
+
+// --- M1: 検算SELECTが1:N JOINで対象件数を過大に返す ---
+
+test('M1: JOINを含む検算SELECTには「結合行数」注記コメントが付き、verifySelectHasJoinがtrueになる', () => {
+  const s = firstStatement('UPDATE users u JOIN orders o ON u.id=o.user_id SET u.flag=1 WHERE o.total>100;', 'mysql');
+  assert.equal(s.verifySelectHasJoin, true);
+  assert.match(s.verifySelect, /^-- ※JOINを含むため結合行数です。1対多の結合では実際の更新行数より大きくなることがあります\n/);
+  assert.match(s.verifySelect, /SELECT COUNT\(\*\) FROM users u JOIN orders o ON u\.id=o\.user_id WHERE o\.total>100;$/);
+});
+
+test('M1: JOINを含まない検算SELECTには注記が付かない（回帰確認）', () => {
+  const s = firstStatement('UPDATE users SET flag=1 WHERE id=1;', 'mysql');
+  assert.equal(s.verifySelectHasJoin, false);
+  assert.ok(!/JOINを含むため/.test(s.verifySelect));
+});
+
+test('M1: app.jsはJOIN時の検算SELECTラベル・注記文言を持つ', () => {
+  const appJs = readProjectFile('js/app.js');
+  assert.match(appJs, /検算SELECT（実行前に対象件数を確認・JOINのため結合行数です）/);
+  assert.match(appJs, /※JOINを含むため結合行数です。1対多の結合では実際の更新行数より大きくなることがあります。/);
+});
+
+// --- M2: 方言再挑戦（mysql）の見せ方が過剰 ---
+
+test('M2: 選択方言(PostgreSQL)で構文エラーのSQLがmysql再挑戦でAST成功しても、選択方言での構文エラーをprimaryErrorとして保持する', () => {
+  const s = firstStatement('UPDATE t SET x=1 WHERE id=1 LIMIT 1;', 'postgres');
+  assert.equal(s.parse.mode, 'ast');
+  assert.equal(s.parse.usedFallbackDialect, 'mysql');
+  assert.ok(s.parse.primaryError, 'primaryError が設定されていません');
+  assert.equal(typeof s.parse.primaryError.message, 'string');
+  assert.equal(s.parse.primaryError.line, 1);
+});
+
+test('M2: primaryErrorの行番号も貼り付けたテキスト全体での行番号に変換される', () => {
+  const sql = 'SELECT 1;\n\nUPDATE t SET x=1 WHERE id=1 LIMIT 1;';
+  const result = analyzeSQL(sql, 'postgres');
+  const updateStmt = result.statements.find((s) => s.kind === 'UPDATE');
+  assert.equal(updateStmt.parse.usedFallbackDialect, 'mysql');
+  assert.equal(updateStmt.parse.primaryError.globalLine, 3);
+});
+
+test('M2: 方言再挑戦が成功した文にはPostgreSQL固有tips（RETURNING）を出さない', () => {
+  const s = firstStatement('UPDATE t SET x=1 WHERE id=1 LIMIT 1;', 'postgres');
+  assert.ok(!hasCode(s.findings, 'postgres-returning-tip'));
+});
+
+test('M2: 通常どおりPostgreSQLでパースできた文には引き続きRETURNINGのtipsが出る（回帰確認）', () => {
+  const s = firstStatement('UPDATE t SET x=1 WHERE id=1;', 'postgres');
+  assert.ok(hasCode(s.findings, 'postgres-returning-tip'));
+});
+
+test('M2: app.jsは方言不一致を「参考」ではなく警告として表示する文言を持つ', () => {
+  const appJs = readProjectFile('js/app.js');
+  assert.match(appJs, /では構文エラーです/);
+  assert.match(appJs, /このSQLは選択した方言では実行できない可能性があります/);
+  assert.ok(!/text: '参考'/.test(appJs), '「参考」表記がまだ残っています');
+});
+
+// --- M3: 括弧で括られたANDグループが left-join-where-cancellation をすり抜ける ---
+
+test('M3: 括弧で括られたANDグループの中の条件でもleft-join-where-cancellationを検出する', () => {
+  const s = firstStatement(
+    "DELETE u FROM users u LEFT JOIN orders o ON u.id = o.user_id WHERE (o.status = 'x' AND o.amount > 10) AND u.active = 1;",
+    'mysql'
+  );
+  assert.ok(hasCode(s.findings, 'left-join-where-cancellation'));
+});
+
+test('M3: 括弧グループの中にORが混ざる場合は従来通り検出しない（誤検知しないことの確認）', () => {
+  const s = firstStatement(
+    "DELETE u FROM users u LEFT JOIN orders o ON u.id = o.user_id WHERE (o.status = 'x' OR o.id IS NULL) AND u.active = 1;",
+    'mysql'
+  );
+  assert.ok(!hasCode(s.findings, 'left-join-where-cancellation'));
+});
+
+// --- minor 1: left-join-where-cancellation で IS NOT NULL を除外しない ---
+
+test('minor1: WHERE o.id IS NOT NULL は外部結合の打ち消しとして検出される', () => {
+  const s = firstStatement('DELETE u FROM users u LEFT JOIN orders o ON u.id = o.user_id WHERE o.id IS NOT NULL;', 'mysql');
+  assert.ok(hasCode(s.findings, 'left-join-where-cancellation'));
+});
+
+test('minor1: WHERE o.id IS NULL は引き続き除外される（アンチジョインの意図的な書き方、回帰確認）', () => {
+  const s = firstStatement('DELETE u FROM users u LEFT JOIN orders o ON u.id = o.user_id WHERE o.id IS NULL;', 'mysql');
+  assert.ok(!hasCode(s.findings, 'left-join-where-cancellation'));
+});
+
+// --- minor 2: not-in-null-risk がリテラル列のNULL混入を検出しない ---
+
+test('minor2: NOT IN (1, NULL, 3) のようなリテラル列のNULL混入をdangerで検出する', () => {
+  const s = firstStatement('DELETE FROM users WHERE id NOT IN (1, NULL, 3);', 'mysql');
+  assert.ok(hasCode(s.findings, 'not-in-null-risk'));
+  assert.equal(findCode(s.findings, 'not-in-null-risk').severity, 'danger');
+  assert.match(findCode(s.findings, 'not-in-null-risk').message, /NULLが含まれるため結果は常に空です/);
+});
+
+test('minor2: NULLを含まないリテラルのNOT INは引き続き検出しない（回帰確認）', () => {
+  const s = firstStatement('DELETE FROM users WHERE id NOT IN (1, 2, 3);', 'mysql');
+  assert.ok(!hasCode(s.findings, 'not-in-null-risk'));
+});
+
+test('minor2: サブクエリのNOT INは引き続きwarningのまま（回帰確認、リテラル版のdangerと混同しない）', () => {
+  const s = firstStatement('DELETE FROM users WHERE id NOT IN (SELECT user_id FROM orders);', 'postgres');
+  assert.ok(hasCode(s.findings, 'not-in-null-risk'));
+  assert.equal(findCode(s.findings, 'not-in-null-risk').severity, 'warning');
+});
+
+test('minor2: 要約でもNOT INリストのNULL混入時に「結果は常に空です」と指摘する', () => {
+  const s = firstStatement('UPDATE t SET x = 1 WHERE id NOT IN (1, NULL, 3);', 'mysql');
+  assert.match(summaryText(s), /NULLが含まれるため結果は常に空です/);
+});
+
+// --- minor 3: mysql-no-limit がMySQLの複数テーブルDELETEにも発火してしまう ---
+
+test('minor3: MySQLの複数テーブルDELETE（DELETE a FROM a JOIN b ...）ではmysql-no-limitを出さない', () => {
+  const s = firstStatement('DELETE a FROM a JOIN b ON a.id = b.id WHERE b.y > 2;', 'mysql');
+  assert.ok(!hasCode(s.findings, 'mysql-no-limit'));
+});
+
+test('minor3: MySQLの単一テーブルDELETEでは引き続きmysql-no-limitが出る（回帰確認）', () => {
+  const s = firstStatement('DELETE FROM a WHERE id > 100;', 'mysql');
+  assert.ok(hasCode(s.findings, 'mysql-no-limit'));
+});
+
+test('minor3: 内部関数isMysqlMultiTableDeleteはJOIN・カンマ複数テーブルDELETEを検出する（正規表現フォールバック経路向け）', () => {
+  const { masked: m1 } = _internal.scan('DELETE a FROM a JOIN b ON a.id=b.id WHERE b.y>2', 'mysql');
+  assert.equal(_internal.isMysqlMultiTableDelete(m1), true);
+
+  const { masked: m2 } = _internal.scan('DELETE FROM a, b USING a JOIN b ON a.id=b.id WHERE b.y>2', 'mysql');
+  assert.equal(_internal.isMysqlMultiTableDelete(m2), true);
+
+  const { masked: m3 } = _internal.scan('DELETE FROM a WHERE id=1', 'mysql');
+  assert.equal(_internal.isMysqlMultiTableDelete(m3), false);
+});
+
+// --- minor 4: RIGHT JOINのNULL側を削除対象にしたケースの文言（「OUTER JOIN した」表記）改善 ---
+
+test('minor4: RIGHT JOINでNULL埋めされる側の打ち消しは「RIGHT JOIN した」と正しく表記される（「OUTER JOIN した」にならない）', () => {
+  const s = firstStatement('DELETE o FROM users u RIGHT JOIN orders o ON u.id = o.user_id WHERE u.active = 1;', 'mysql');
+  const f = findCode(s.findings, 'left-join-where-cancellation');
+  assert.ok(f);
+  assert.match(f.message, /RIGHT JOIN した/);
+  assert.ok(!/OUTER JOIN した/.test(f.message), 'joinKind不明時のフォールバック表記「OUTER JOIN した」のままです');
+});
+
+test('minor4: LEFT JOINの通常ケースでは引き続き「LEFT JOIN した」と表記される（回帰確認）', () => {
+  const s = firstStatement("UPDATE u SET u.flg = 1 FROM users u LEFT JOIN depts d ON u.dept_id = d.id WHERE d.code = 'A';", 'mssql');
+  const f = findCode(s.findings, 'left-join-where-cancellation');
+  assert.ok(f);
+  assert.match(f.message, /LEFT JOIN した/);
 });
 
 // ---------------------------------------------------------------------------

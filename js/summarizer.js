@@ -178,6 +178,13 @@ function conditionText(expr) {
         : `${left} がサブクエリの結果に含まれない`;
     }
     const list = valueText(expr.right);
+    // NOT IN の値リストに直接NULLが含まれる場合、SQLの三値論理により比較結果が
+    // 常にUNKNOWNになり、この条件は常に空（1行もヒットしない）になる。
+    // 要約でも黙って省略せず、その事実をそのまま書く。
+    if (op === 'NOT IN' && expr.right && expr.right.type === 'expr_list'
+        && Array.isArray(expr.right.value) && expr.right.value.some((v) => v && v.type === 'null')) {
+      return `${left} が ${list} のいずれでもない（NULLが含まれるため結果は常に空です）`;
+    }
     return op === 'IN' ? `${left} が ${list} のいずれかである` : `${left} が ${list} のいずれでもない`;
   }
 

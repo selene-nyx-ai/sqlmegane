@@ -99,12 +99,22 @@ function parseStatement(sql, uiDialect) {
   if (!primary) return { ok: false, error: { message: 'この方言は構文解析の対象外です', line: null, column: null }, unsupportedDialect: true };
 
   const first = tryAstify(sql, primary);
-  if (first.ok) return { ok: true, ast: first.ast, parser: first.parser, parserDialect: primary, usedFallbackDialect: null };
+  if (first.ok) return { ok: true, ast: first.ast, parser: first.parser, parserDialect: primary, usedFallbackDialect: null, primaryError: null };
 
   if (primary !== RETRY_DIALECT) {
     const retry = tryAstify(sql, RETRY_DIALECT);
     if (retry.ok) {
-      return { ok: true, ast: retry.ast, parser: retry.parser, parserDialect: RETRY_DIALECT, usedFallbackDialect: RETRY_DIALECT };
+      // 選択方言（primary）では構文エラーだったことを呼び出し側（UI）に伝えるため、
+      // 元の失敗理由をそのまま持ち帰る。再挑戦が成功したからといって、選択方言で
+      // 実行できることを意味しない（見せ方は analyzer.js / app.js 側で警告として扱う）。
+      return {
+        ok: true,
+        ast: retry.ast,
+        parser: retry.parser,
+        parserDialect: RETRY_DIALECT,
+        usedFallbackDialect: RETRY_DIALECT,
+        primaryError: first.error,
+      };
     }
   }
   return { ok: false, error: first.error };
@@ -235,25 +245,35 @@ function joinKind(entry) {
  * 外部結合によって「NULL埋めされうる（＝一致しない行も残る）」側のテーブル参照集合。
  * LEFT JOIN なら結合された側、RIGHT JOIN ならそれより前の全テーブル、
  * FULL JOIN なら両方が該当する。
- * 戻り値は 参照キー（エイリアスまたはテーブル名、小文字） の Set。
+ * 戻り値は 参照キー（エイリアスまたはテーブル名、小文字）→ その参照を NULL 埋め対象に
+ * した JOIN の種類（'LEFT'|'RIGHT'|'FULL'） の Map。
+ *
+ * Map にする理由: RIGHT JOIN で NULL 埋めされる側は「それより前のテーブル」であり、
+ * そのテーブル自身の rowSource エントリの `.join` は付いていない（先頭の FROM 起点
+ * テーブルなど）。そのため呼び出し側で `A.joinKind(entry)` を引いても null にしかならず、
+ * 「実際にNULL埋めを引き起こしているJOINの種類」が分からない。ここで原因のJOIN種別を
+ * 値として持ち帰ることで、呼び出し側が正しい表記（例: 「RIGHT JOIN した」）を組み立てられる。
+ * 同じテーブルが複数のJOINでNULL埋め対象になる場合は、先に見つかった方を優先する。
  */
 function nullableTableKeys(rowSource) {
-  const keys = new Set();
+  const map = new Map();
   const keyOf = (t) => lower(t.as || t.table);
+  const setIfAbsent = (key, kind) => {
+    if (key == null) return;
+    if (!map.has(key)) map.set(key, kind);
+  };
   for (let i = 0; i < rowSource.length; i++) {
     const kind = joinKind(rowSource[i]);
     if (kind === 'LEFT') {
-      keys.add(keyOf(rowSource[i]));
+      setIfAbsent(keyOf(rowSource[i]), 'LEFT');
     } else if (kind === 'RIGHT') {
-      for (let j = 0; j < i; j++) keys.add(keyOf(rowSource[j]));
+      for (let j = 0; j < i; j++) setIfAbsent(keyOf(rowSource[j]), 'RIGHT');
     } else if (kind === 'FULL') {
-      keys.add(keyOf(rowSource[i]));
-      for (let j = 0; j < i; j++) keys.add(keyOf(rowSource[j]));
+      setIfAbsent(keyOf(rowSource[i]), 'FULL');
+      for (let j = 0; j < i; j++) setIfAbsent(keyOf(rowSource[j]), 'FULL');
     }
   }
-  keys.delete(null);
-  keys.delete(undefined);
-  return keys;
+  return map;
 }
 
 /** binary_expr を指定の論理演算子でフラットに分解する（括弧の情報は保持しない） */
@@ -341,16 +361,30 @@ function hasMixedLogicalWithoutParens(expr) {
 }
 
 /**
+ * logicalTree() のノードから「必ず適用されるAND項」を再帰的に集める。
+ * connector が null の葉はそのまま採用、'AND' はその子を再帰的に展開して集約する
+ * （括弧で括られたANDグループ、例: `(a AND b) AND c` の `a`・`b` も
+ * 「必ず適用される」ことに変わりはないため、トップレベルAND項に含める必要がある）。
+ * 'OR' の下は「他の条件で救われる可能性がある」ため、その枝ごと丸ごと除外する。
+ */
+function collectTopLevelAndParts(node) {
+  if (node.connector === null) return node.expr ? [node.expr] : [];
+  if (node.connector === 'AND') {
+    return node.children.reduce((acc, c) => acc.concat(collectTopLevelAndParts(c)), []);
+  }
+  return [];
+}
+
+/**
  * 「この条件は必ず適用される」と言い切れるトップレベルのAND項だけを返す。
  * ORの下にある条件は「他の条件で救われる可能性がある」ため含めない
  * （外部結合の打ち消し判定などで誤検知しないようにするため）。
+ * 括弧で括られたANDグループ（例: `(a AND b) AND c`）は、括弧の外にORが無い限り
+ * 中身も「必ず適用される」条件なので、再帰的に平坦化して含める。
  */
 function topLevelAndParts(expr) {
   if (!expr) return [];
-  const tree = logicalTree(expr);
-  if (tree.connector === null) return tree.expr ? [tree.expr] : [];
-  if (tree.connector === 'AND') return tree.children.filter((c) => c.connector === null).map((c) => c.expr);
-  return [];
+  return collectTopLevelAndParts(logicalTree(expr));
 }
 
 /** 式ツリーを深さ優先で走査する（サブクエリの中にも入る） */
