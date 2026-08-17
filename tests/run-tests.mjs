@@ -1816,6 +1816,107 @@ test("Phase1: 抽出DMLの LIKE '%...' も like-leading-wildcard で検出され
   assert.ok(hasCode(u.plsql.items[0].findings, 'like-leading-wildcard'));
 });
 
+// --- 常に真のWHERE句: カーソル定義とSELECT文（プロダクトオーナー指摘の穴埋め） -------
+
+test('カーソル定義のWHERE 1=1はwarningで検出される（AST経路・mysql方言のパーサでカーソルSELECTをパース）', () => {
+  const sql = 'CREATE OR REPLACE PACKAGE BODY pkg_x AS\n'
+    + '  PROCEDURE p1 IS\n'
+    + '    CURSOR c_orders IS SELECT order_id FROM orders WHERE 1=1;\n'
+    + '  BEGIN\n    NULL;\n  END p1;\nEND pkg_x;\n/';
+  const u = plsqlUnit(sql, 'oracle');
+  const item = u.plsql.items[0];
+  assert.equal(item.kind, 'CURSOR');
+  const f = findCode(item.findings, 'always-true-where');
+  assert.ok(f, 'カーソルのWHERE 1=1が検出されていません');
+  assert.equal(f.severity, 'warning');
+  assert.match(f.message, /カーソル/);
+});
+
+test('しぐれさん再現ケース: plsql-sample-real.sql のカーソルWHEREを1=1に変えるとwarningが出る', () => {
+  // サンプルファイルは別リポジトリ（AutoClaude/business/）にある実データのため、
+  // sqlmegane側には存在しない場合スキップする（CI等で当該パスが無い環境を想定）。
+  const samplePath = 'D:\\GitHub\\AutoClaude\\business\\plsql-sample-real.sql';
+  if (!fs.existsSync(samplePath)) return;
+  const sql = fs.readFileSync(samplePath, 'utf8')
+    .replace("WHERE status = 'PENDING'", 'WHERE 1=1');
+  const result = analyzeSQL(sql, 'oracle');
+  const unit = result.statements.find((s) => s.plsql && s.plsql.items.some((i) => i.cursorName === 'c_orders'));
+  assert.ok(unit, 'c_ordersカーソルを含むユニットが見つかりません');
+  const item = unit.plsql.items.find((i) => i.cursorName === 'c_orders');
+  assert.equal(item.kind, 'CURSOR');
+  const f = findCode(item.findings, 'always-true-where');
+  assert.ok(f, '改変後のカーソルでwarningが検出されていません');
+  assert.equal(f.severity, 'warning');
+  assert.ok(!hasCode(item.findings, 'no-where-update') && !hasCode(item.findings, 'no-where-delete'));
+});
+
+test('FORループのカーソルSELECTのWHERE 1=1もwarningで検出される', () => {
+  const sql = 'BEGIN\n  FOR r IN (SELECT id FROM t WHERE 1=1) LOOP\n    NULL;\n  END LOOP;\nEND;\n/';
+  const u = plsqlUnit(sql);
+  const item = u.plsql.items.find((i) => i.kind === 'CURSOR');
+  assert.ok(item, 'FORループのカーソルが抽出されていません');
+  const f = findCode(item.findings, 'always-true-where');
+  assert.ok(f);
+  assert.equal(f.severity, 'warning');
+});
+
+test('WHERE句のないカーソル定義はinfoで「無条件で全行取得」を明示する', () => {
+  const sql = 'CREATE OR REPLACE PACKAGE BODY pkg_x AS\n'
+    + '  PROCEDURE p1 IS\n'
+    + '    CURSOR c_all IS SELECT id FROM t;\n'
+    + '  BEGIN\n    NULL;\n  END p1;\nEND pkg_x;\n/';
+  const u = plsqlUnit(sql, 'oracle');
+  const item = u.plsql.items[0];
+  const f = findCode(item.findings, 'cursor-no-where');
+  assert.ok(f, 'WHERE句なしカーソルのinfoが出ていません');
+  assert.equal(f.severity, 'info');
+});
+
+test('絞り込み条件のある通常のカーソル定義は危険を検出しない（従来通り）', () => {
+  const sql = 'CREATE OR REPLACE PACKAGE BODY pkg_x AS\n'
+    + '  PROCEDURE p1 IS\n'
+    + "    CURSOR c_orders IS SELECT id FROM orders WHERE status = 'PENDING';\n"
+    + '  BEGIN\n    NULL;\n  END p1;\nEND pkg_x;\n/';
+  const u = plsqlUnit(sql, 'oracle');
+  assert.equal(u.plsql.items[0].findings.length, 0);
+});
+
+test('通常のSELECT文のWHERE 1=1はinfoで検出される（mysql方言・AST経路）', () => {
+  const s = firstStatement('SELECT * FROM t WHERE 1=1;', 'mysql');
+  assert.equal(s.kind, 'SELECT');
+  const f = findCode(s.findings, 'always-true-where');
+  assert.ok(f);
+  assert.equal(f.severity, 'info');
+  assert.match(f.message, /動的SQL/);
+});
+
+test('通常のSELECT文のWHERE 1=1はinfoで検出される（oracle方言・regex経路）', () => {
+  const s = firstStatement('SELECT * FROM t WHERE 1=1;', 'oracle');
+  assert.equal(s.kind, 'SELECT');
+  assert.equal(s.parse.mode, 'regex-only');
+  const f = findCode(s.findings, 'always-true-where');
+  assert.ok(f);
+  assert.equal(f.severity, 'info');
+});
+
+test('通常のSELECT文でWHERE句が無くてもcursor-no-whereは出ない（カーソル以外は対象外）', () => {
+  const s = firstStatement('SELECT * FROM t;', 'mysql');
+  assert.ok(!hasCode(s.findings, 'cursor-no-where'));
+  assert.ok(!hasCode(s.findings, 'always-true-where'));
+});
+
+test('通常のSELECT文で条件のあるWHEREはalways-true-whereを出さない', () => {
+  const s = firstStatement('SELECT * FROM t WHERE id = 1;', 'mysql');
+  assert.ok(!hasCode(s.findings, 'always-true-where'));
+});
+
+test('UPDATE/DELETEのWHERE 1=1はdangerのまま変わらない（回帰防止）', () => {
+  const u = firstStatement('UPDATE t SET x=1 WHERE 1=1;', 'mysql');
+  assert.equal(findCode(u.findings, 'always-true-where').severity, 'danger');
+  const d = firstStatement('DELETE FROM t WHERE 1=1;', 'oracle');
+  assert.equal(findCode(d.findings, 'always-true-where').severity, 'danger');
+});
+
 // --- フォールバック --------------------------------------------------------
 
 test('Phase1: DMLを1本も抽出できない実行ブロックは従来通り unanalyzed-statement 警告を出す', () => {

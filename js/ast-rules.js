@@ -291,9 +291,57 @@ function isMultiTableStatement(ast) {
  * ここでは「文単位」で判定できるものだけを返し、トランザクション文脈など
  * 複数文にまたがるルールは analyzer.js 側で従来通り付与する。
  */
-function analyzeAst(ast, kind, dialect) {
+/**
+ * SELECT文（PL/SQLカーソル定義から抽出したSELECTを含む）の常に真のWHERE句を判定する。
+ * カーソル定義（opts.cursorContext）かどうかで severity とメッセージを変える:
+ *  - 通常のSELECT: 動的SQLの雛形（WHERE 1=1 に追記していく書き方）で意図的なことも
+ *    多いため info（要確認レベル）。
+ *  - カーソル定義: このSELECTがループ内DML（UPDATE/DELETE等）の対象範囲そのものに
+ *    直結するため、通常のSELECTより一段階重い warning。
+ *  WHERE句が丸ごと無いカーソル定義も同様に「無条件で全行取得」であることを info で
+ *  明示する（通常のSELECTでWHERE句が無いのはごく普通のことなので対象外）。
+ */
+function analyzeSelectAst(ast, opts) {
+  const findings = [];
+  const isCursor = !!(opts && opts.cursorContext);
+
+  if (!ast.where) {
+    if (isCursor) {
+      findings.push(mk(
+        'info',
+        'cursor-no-where',
+        '絞り込み条件のないカーソル',
+        'このカーソルは無条件で全行を取得します（ループ内のDMLの対象範囲に直結します）。'
+      ));
+    }
+    return findings;
+  }
+
+  if (isAlwaysTrueWhere(ast.where)) {
+    if (isCursor) {
+      findings.push(mk(
+        'warning',
+        'always-true-where',
+        '常に真になるカーソルの条件',
+        'カーソルの条件が常に真です。このカーソルは全行を取得し、ループ内のDML（UPDATE/DELETE等）の対象範囲に直結します。絞り込み条件が抜けていないか確認してください。'
+      ));
+    } else {
+      findings.push(mk(
+        'info',
+        'always-true-where',
+        '常に真になるWHERE句（全行が対象）',
+        'WHERE句の条件が常に真のため、全行が対象になります。動的SQLの雛形（WHERE 1=1 に条件を追記する書き方）なら意図通りですが、絞り込みの書き忘れがないか確認してください。'
+      ));
+    }
+  }
+
+  return findings;
+}
+
+function analyzeAst(ast, kind, dialect, opts) {
   const findings = [];
   if (!ast || typeof ast !== 'object') return findings;
+  if (kind === 'SELECT') return analyzeSelectAst(ast, opts);
   if (kind !== 'UPDATE' && kind !== 'DELETE') return findings;
 
   const rowSource = A.rowSourceTables(ast);
@@ -439,6 +487,7 @@ globalThis.SQLMeganeAstRules = {
   _internal: {
     isTautologyExpr,
     isAlwaysTrueWhere,
+    analyzeSelectAst,
     hasUnparenthesizedOrAnd,
     hasLeadingWildcardLike,
     findQuotedNumericComparisons,

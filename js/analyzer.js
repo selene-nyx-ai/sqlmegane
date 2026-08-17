@@ -1178,7 +1178,11 @@ function analyzePlsqlUnit(unitText, dialect) {
   const info = P.extractPlsqlUnit(unitText);
 
   const items = info.items.map((item) => {
-    const r = analyzeStatement(item.sql, dialect, {});
+    // カーソル定義（FORループのカーソルSELECTを含む）は、通常のSELECTと違い
+    // ループ内DML（UPDATE/DELETE等）の対象範囲そのものになる。そのため常に真の
+    // WHERE句・WHERE句なしの扱いを一段階重くする（analyzeAst / analyzeStatementByRegex
+    // の kind === 'SELECT' 分岐に opts.cursorContext として渡す）。
+    const r = analyzeStatement(item.sql, dialect, { cursorContext: item.kind === 'CURSOR' });
     const verifySelect = r.verifySelect;
     return {
       label: item.label,
@@ -1251,7 +1255,10 @@ function collectPlsqlFindings(stmt) {
 // ---------------------------------------------------------------------------
 
 // AST の文種別 ↔ 正規表現側の文種別の対応（両者が食い違う場合はASTルールを使わない）
-const AST_TYPE_TO_KIND = { update: 'UPDATE', delete: 'DELETE' };
+// select も含める。PL/SQLカーソル定義から抽出したSELECT（opts.cursorContext）を
+// 含め、常に真のWHERE句をAST経路でも検出するため（regex経路の analyzeStatementByRegex
+// と一貫させる）。
+const AST_TYPE_TO_KIND = { update: 'UPDATE', delete: 'DELETE', select: 'SELECT' };
 
 /**
  * 1文を解析する。
@@ -1302,14 +1309,15 @@ function analyzeStatement(rawStmt, dialect, opts) {
 
   const summary = (ast && Summarizer) ? Summarizer.summarize(ast) : null;
 
-  // AST基盤ルールを使うのは UPDATE / DELETE のうち、ASTの文種別が正規表現側の
+  // AST基盤ルールを使うのは UPDATE / DELETE / SELECT のうち、ASTの文種別が正規表現側の
   // 判定と一致するものだけ。食い違うときは安全側（従来ロジック）に倒す。
   // それ以外の文種別（TRUNCATE / DROP / トランザクション制御など）はASTを使っても
   // 判定内容が変わらないため、従来経路のまま要約だけを追加する。
   const astRulesUsable = !!(ast && AstRules && AST_TYPE_TO_KIND[ast.type] === kind);
+  const cursorContext = !!(opts && opts.cursorContext);
 
   if (astRulesUsable) {
-    const findings = AstRules.analyzeAst(ast, kind, dialect);
+    const findings = AstRules.analyzeAst(ast, kind, dialect, { cursorContext });
     let verifySelectRaw = null;
     if (kind === 'UPDATE' || kind === 'DELETE') {
       verifySelectRaw = buildVerifySelectFromAst(kind, ast, masked, plain, whereInfo)
@@ -1330,7 +1338,7 @@ function analyzeStatement(rawStmt, dialect, opts) {
     };
   }
 
-  return analyzeStatementByRegex(rawStmt, dialect, { plain, masked, kind, whereInfo, summary, parse, ast });
+  return analyzeStatementByRegex(rawStmt, dialect, { plain, masked, kind, whereInfo, summary, parse, ast, cursorContext });
 }
 
 /** 従来の正規表現ヒューリスティックによる解析（フォールバック経路） */
@@ -1436,6 +1444,40 @@ function analyzeStatementByRegex(rawStmt, dialect, ctx) {
           'mysql-no-limit',
           'LIMIT句がありません（MySQL）',
           'MySQLではUPDATE/DELETEにLIMITを付けることで、一度に変更される行数の上限を設定できます。対象件数の見積もりに自信がない場合は、検算SELECTで件数を確認するか、LIMITを付けて段階的に実行することを検討してください。'
+        ));
+      }
+    }
+  }
+
+  // SELECT文の常に真のWHERE句（PL/SQLカーソル定義から抽出したSELECTを含む）。
+  // AST経路（analyzeSelectAst）と同じ判定基準・同じ severity/message にする。
+  // 通常のSELECTでWHERE句自体が無いのはごく普通のことなので対象外にするが、
+  // カーソル定義（ctx.cursorContext）に限っては「無条件で全行取得」自体を
+  // 明示する（このSELECTがループ内DMLの対象範囲そのものになるため）。
+  if (kind === 'SELECT') {
+    if (!whereInfo) {
+      if (ctx.cursorContext) {
+        findings.push(mk(
+          'info',
+          'cursor-no-where',
+          '絞り込み条件のないカーソル',
+          'このカーソルは無条件で全行を取得します（ループ内のDMLの対象範囲に直結します）。'
+        ));
+      }
+    } else if (isTautologyClause(whereInfo.plainClause) || hasTopLevelTautologyOr(whereInfo.maskedClause, whereInfo.plainClause)) {
+      if (ctx.cursorContext) {
+        findings.push(mk(
+          'warning',
+          'always-true-where',
+          '常に真になるカーソルの条件',
+          'カーソルの条件が常に真です。このカーソルは全行を取得し、ループ内のDML（UPDATE/DELETE等）の対象範囲に直結します。絞り込み条件が抜けていないか確認してください。'
+        ));
+      } else {
+        findings.push(mk(
+          'info',
+          'always-true-where',
+          '常に真になるWHERE句（全行が対象）',
+          'WHERE句の条件が常に真のため、全行が対象になります。動的SQLの雛形（WHERE 1=1 に条件を追記する書き方）なら意図通りですが、絞り込みの書き忘れがないか確認してください。'
         ));
       }
     }
