@@ -197,8 +197,9 @@ function findNotInSubqueries(ast) {
  * トップレベルANDで等値比較などで絞り込むと、NULL行が必ず条件から漏れるため
  * 実質的にINNER JOINになる（外部結合の意味が失われる）。
  *
- * 誤検知を避けるため、対象はトップレベルのAND項のみに限定する。
- * `IS NULL` / `IS NOT NULL` は意図的な書き方（アンチジョイン等）なので対象外。
+ * 誤検知を避けるため、対象はトップレベルのAND項（括弧付きANDグループ含む）のみに限定する。
+ * `IS NULL` は意図的な書き方（アンチジョイン）なので対象外。
+ * `IS NOT NULL` は外部結合の打ち消しそのものなので検出対象。
  */
 function findOuterJoinCancellation(ast) {
   const rowSource = A.rowSourceTables(ast);
