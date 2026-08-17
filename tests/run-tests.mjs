@@ -22,10 +22,12 @@ import '../js/summarizer.js';
 import '../js/ast-rules.js';
 import '../js/plsql-extract.js';
 import '../js/analyzer.js';
+import '../js/dialect-detect.js';
 
 const { analyzeSQL, splitStatements, _internal } = globalThis.SQLMeganeAnalyzer;
 const PlsqlExtract = globalThis.SQLMeganePlsqlExtract;
 const { summarize, summaryToLines } = globalThis.SQLMeganeSummarizer;
+const { detectDialect } = globalThis.SQLMeganeDialectDetect;
 
 /** 要約を1本のテキストにして部分一致で検証しやすくする */
 function summaryText(stmt) {
@@ -1948,6 +1950,208 @@ test('Phase1: splitSlashChunks は文字列リテラル内の `/` 行では分�
   const src = "BEGIN\n  v := '\n/\n';\nEND;\n/";
   const chunks = PlsqlExtract.splitSlashChunks(src);
   assert.equal(chunks.length, 1, '文字列リテラル内の `/` 行で分割されています');
+});
+
+// ---------------------------------------------------------------------------
+// 機能A: 「チェックゼロの文」の撲滅（MERGE / OTHER文への簡易チェック併走）
+// ---------------------------------------------------------------------------
+
+test('機能A: ON句ありのMERGEはmerge-missing-on警告が付かない', () => {
+  const s = firstStatement('MERGE INTO tgt t USING src s ON (t.id = s.id) WHEN MATCHED THEN UPDATE SET t.val = s.val;', 'oracle');
+  assert.equal(s.kind, 'MERGE');
+  assert.ok(!hasCode(s.findings, 'merge-missing-on'), 'ON句があるのにmerge-missing-onが誤爆しています');
+  const f = findCode(s.findings, 'unanalyzed-statement');
+  assert.ok(f);
+  assert.equal(f.severity, 'warning');
+  assert.equal(f.meta && f.meta.checkLevel, 'basic', 'MERGEは簡易チェックを併走させるのでcheckLevelはbasicになるはず');
+  assert.match(f.message, /MERGE文の解析は未対応/, '既存の文言（テスト互換性）が失われています');
+  assert.match(f.message, /簡易チェックのみ実施/, '簡易チェックのみ実施した旨が新文言に含まれていません');
+});
+
+test('機能A: ON句なしのMERGEは「結合条件が確認できません」警告が付く', () => {
+  const s = firstStatement('MERGE INTO tgt t USING src s WHEN MATCHED THEN UPDATE SET t.val = s.val;', 'oracle');
+  const f = findCode(s.findings, 'merge-missing-on');
+  assert.ok(f, 'ON句がないMERGEでmerge-missing-onが検出されていません');
+  assert.equal(f.severity, 'warning');
+  assert.match(f.message, /結合条件が確認できません/);
+});
+
+test('機能A: MERGEのWHEN MATCHED THEN UPDATEのWHERE句が「1=1」なら常に真になる条件を検出する', () => {
+  const s = firstStatement("MERGE INTO tgt t USING src s ON (t.id = s.id) WHEN MATCHED THEN UPDATE SET t.val = s.val WHERE 1=1;", 'oracle');
+  const f = findCode(s.findings, 'always-true-where');
+  assert.ok(f, 'MERGEのWHERE句のOR 1=1相当が検出されていません');
+  assert.equal(f.severity, 'danger');
+  assert.match(f.title, /WHEN MATCHED THEN UPDATE WHERE句/);
+});
+
+test('機能A: MERGEのWHEN MATCHED THEN UPDATEのSET句にOR 1=1相当が含まれる場合も検出する', () => {
+  const s = firstStatement("MERGE INTO tgt t USING src s ON (t.id = s.id) WHEN MATCHED THEN UPDATE SET t.val = s.val WHERE t.id = 1 OR 1=1;", 'oracle');
+  const f = findCode(s.findings, 'always-true-where');
+  assert.ok(f);
+  assert.equal(f.severity, 'danger');
+});
+
+test('機能A: MERGEのWHEN MATCHED THEN UPDATEのWHERE句のLIKE前方一致でないパターンを検出する', () => {
+  const s = firstStatement("MERGE INTO tgt t USING src s ON (t.id = s.id) WHEN MATCHED THEN UPDATE SET t.val = s.val WHERE t.name LIKE '%foo';", 'oracle');
+  const f = findCode(s.findings, 'like-leading-wildcard');
+  assert.ok(f, 'MERGEのWHERE句のLIKE前方一致でないパターンが検出されていません');
+});
+
+test('機能A: Oracle形式（WHEN MATCHED THEN UPDATE ... DELETE WHERE ...）のMERGEは「削除句を含むMERGE」infoが付く', () => {
+  const s = firstStatement("MERGE INTO tgt t USING src s ON (t.id = s.id) WHEN MATCHED THEN UPDATE SET t.val = s.val WHERE t.val <> s.val DELETE WHERE t.flag = 'Y';", 'oracle');
+  const f = findCode(s.findings, 'merge-has-delete');
+  assert.ok(f, 'Oracle形式の埋め込みDELETEが検出されていません');
+  assert.equal(f.severity, 'info');
+  assert.match(f.title, /削除句を含むMERGE/);
+});
+
+test('機能A: T-SQL形式（WHEN MATCHED THEN DELETE 単独）のMERGEも「削除句を含むMERGE」infoが付く', () => {
+  const s = firstStatement('MERGE INTO tgt AS t USING src AS s ON (t.id = s.id) WHEN MATCHED AND s.deleted = 1 THEN DELETE WHEN MATCHED THEN UPDATE SET t.val = s.val;', 'mssql');
+  const f = findCode(s.findings, 'merge-has-delete');
+  assert.ok(f, 'T-SQL形式の単独DELETEアクションが検出されていません');
+  assert.equal(f.severity, 'info');
+});
+
+test('機能A: MERGEのWHEN NOT MATCHED THEN INSERTのWHERE句（Oracle）にもOR 1=1相当を検出する', () => {
+  const s = firstStatement("MERGE INTO tgt t USING src s ON (t.id = s.id) WHEN NOT MATCHED THEN INSERT (id, val) VALUES (s.id, s.val) WHERE 1=1;", 'oracle');
+  const f = findCode(s.findings, 'always-true-where');
+  assert.ok(f, 'INSERT句のWHERE1=1が検出されていません');
+  assert.match(f.title, /WHEN NOT MATCHED THEN INSERT WHERE句/);
+});
+
+test('機能A: kind=OTHERで破壊的キーワード（EXEC）を含む文はcheckLevel=basicになる', () => {
+  const s = firstStatement('EXEC sp_do_something @id = 1;', 'mssql');
+  const f = findCode(s.findings, 'unanalyzed-statement');
+  assert.ok(f);
+  assert.equal(f.meta && f.meta.checkLevel, 'basic');
+  assert.match(f.message, /簡易チェックのみ実施/);
+});
+
+test('機能A: kind=OTHERで破壊的キーワードを含み、文字列リテラル外に1=1がある場合はalways-true-whereも検出する', () => {
+  const s = firstStatement('EXEC sp_do_something WHERE 1=1;', 'mssql');
+  assert.ok(hasCode(s.findings, 'unanalyzed-statement'));
+  const f = findCode(s.findings, 'always-true-where');
+  assert.ok(f, 'OTHER文の文字列リテラル外1=1が検出されていません');
+  assert.equal(f.severity, 'warning');
+});
+
+test('機能A: kind=OTHERで破壊的キーワードが無くても、1=1のような常に真になる式は検出する（unanalyzed-statementは付けない）', () => {
+  const s = firstStatement('SHOW STATUS WHERE 1=1;', 'mysql');
+  assert.equal(s.kind, 'OTHER');
+  assert.ok(!hasCode(s.findings, 'unanalyzed-statement'), '破壊的キーワードが無いのにunanalyzed-statementが付いています');
+  const f = findCode(s.findings, 'always-true-where');
+  assert.ok(f, '破壊的キーワードが無くても1=1自体は検出してほしい');
+});
+
+test('機能A: kind=OTHERで文字列リテラル内の1=1は誤検知しない', () => {
+  const s = firstStatement("EXEC sp_run 'WHERE 1=1';", 'mssql');
+  assert.ok(!hasCode(s.findings, 'always-true-where'), '文字列リテラル内の1=1を誤検知しています');
+});
+
+test('機能A: PL/SQLブロックからDMLを1本も抽出できない場合は従来通りcheckLevel=noneのまま', () => {
+  const sql = 'BEGIN\n  EXECUTE IMMEDIATE v_sql;\nEND;\n/';
+  const u = analyzeSQL(sql, 'oracle').statements[0];
+  const f = findCode(u.findings, 'unanalyzed-statement');
+  assert.ok(f, 'DMLを抽出できない実行ブロックでunanalyzed-statementが付いていません');
+  assert.equal(f.meta && f.meta.checkLevel, 'none', '簡易チェックすら適用できない場合はcheckLevel=noneのままであるべき');
+  assert.match(f.message, /チェックは行われていません/, '簡易チェックすら不可能な場合は従来文言を維持する');
+});
+
+test('機能A: findGenericTautologiesは数値の1=1と文字列同士のa=aを検出し、文字列内の1=1は無視する', () => {
+  const { scan } = _internal;
+  const { masked, plain } = scan("SELECT * FROM t WHERE 1=1 AND x = 'literal 1=1 inside' AND 'a'='a'", 'generic');
+  const hits = _internal.findGenericTautologies(masked, plain);
+  assert.ok(hits.some((h) => h === '1=1'));
+  assert.ok(hits.some((h) => h === "'a'='a'"));
+  assert.ok(!hits.some((h) => /literal/.test(h)));
+});
+
+// ---------------------------------------------------------------------------
+// 機能B: 方言の自動判定（dialect-detect.js）
+// ---------------------------------------------------------------------------
+
+test('機能B: Oracle方言のマーカー（NVL・SYSDATE・ROWNUM・(+)・%TYPE・DUAL・MERGE INTO）でoracleと判定する', () => {
+  const sql = "SELECT NVL(a.name, 'unknown') FROM emp a, dept b WHERE a.dept_id = b.id(+) AND ROWNUM <= 10 AND a.hired = SYSDATE";
+  const d = detectDialect(sql);
+  assert.equal(d.dialect, 'oracle');
+  assert.equal(d.reason, 'heuristic');
+  assert.ok(d.markers.length > 0 && d.markers.length <= 3);
+});
+
+test('機能B: しぐれさん提供の実サンプル（PL/SQLパッケージ）がoracleと判定される', () => {
+  const samplePath = path.join('d:', 'GitHub', 'AutoClaude', 'business', 'plsql-sample-real.sql');
+  if (!fs.existsSync(samplePath)) {
+    console.warn('  [skip] plsql-sample-real.sql が見つからないためスキップ:', samplePath);
+    return;
+  }
+  const sql = fs.readFileSync(samplePath, 'utf8');
+  const d = detectDialect(sql);
+  assert.equal(d.dialect, 'oracle', `期待: oracle, 実際: ${d.dialect}（reason=${d.reason}, scores=${JSON.stringify(d.scores)}）`);
+});
+
+test('機能B: SQL Server方言のマーカー（@変数・[角括弧]・TOP n・GETDATE・ISNULL・BEGIN TRAN・sp_・NOLOCK）でmssqlと判定する', () => {
+  const sql = "DECLARE @id INT; SELECT TOP 10 * FROM [dbo].[Users] WITH (NOLOCK) WHERE ISNULL(deleted_at, GETDATE()) = GETDATE(); EXEC sp_helptext 'x'; BEGIN TRAN;";
+  const d = detectDialect(sql);
+  assert.equal(d.dialect, 'mssql');
+  assert.equal(d.reason, 'heuristic');
+});
+
+test('機能B: MySQL方言のマーカー（バッククォート・LIMIT・NOW・ON DUPLICATE KEY・AUTO_INCREMENT）でmysqlと判定する', () => {
+  const sql = "INSERT INTO `users` (id, updated_at) VALUES (1, NOW()) ON DUPLICATE KEY UPDATE updated_at = NOW(); SELECT * FROM `t` LIMIT 10;";
+  const d = detectDialect(sql);
+  assert.equal(d.dialect, 'mysql');
+  assert.equal(d.reason, 'heuristic');
+});
+
+test('機能B: PostgreSQL方言のマーカー（::キャスト・RETURNING・ILIKE・ON CONFLICT・SERIAL）でpostgresと判定する', () => {
+  const sql = "UPDATE t SET x = y::int WHERE name ILIKE 'a%' RETURNING id; INSERT INTO t (id) VALUES (1) ON CONFLICT (id) DO NOTHING;";
+  const d = detectDialect(sql);
+  assert.equal(d.dialect, 'postgres');
+  assert.equal(d.reason, 'heuristic');
+});
+
+test('機能B: 文字列リテラル内に方言キーワードがあっても誤判定しない', () => {
+  const sql = "SELECT * FROM t WHERE msg = 'Please add LIMIT 10 and TOP 5 and `col` and ::cast to your query';";
+  const d = detectDialect(sql);
+  assert.notEqual(d.reason, 'heuristic', `文字列内のキーワードでheuristic判定してしまっています（scores=${JSON.stringify(d.scores)}）`);
+});
+
+test('機能B: コメント内に方言キーワードがあっても誤判定しない', () => {
+  const sql = "-- この処理はLIMIT 10件ずつ`col`を処理するTOP 5対応版\nSELECT * FROM t WHERE id = 1;";
+  const d = detectDialect(sql);
+  assert.notEqual(d.reason, 'heuristic', `コメント内のキーワードでheuristic判定してしまっています（scores=${JSON.stringify(d.scores)}）`);
+});
+
+test('機能B: ANSI互換SQL（複数方言でパース成功）はmysqlを採用しparse-success-ambiguousになる', () => {
+  const sql = 'SELECT id, name FROM users WHERE id = 1;';
+  const d = detectDialect(sql);
+  assert.equal(d.reason, 'parse-success-ambiguous');
+  assert.equal(d.dialect, 'mysql');
+});
+
+test('機能B: マーカーが同点タイの場合はheuristicで決め打ちしない（試しパースに回す）', () => {
+  const sql = 'SELECT NVL(`col`, 0) FROM t;';
+  const d = detectDialect(sql);
+  assert.notEqual(d.reason, 'heuristic', 'oracle(NVL)とmysql(バッククォート)が同点タイなのにheuristicで決めています');
+});
+
+test('機能B: どの方言のパーサでも通らずマーカーも無いSQLは汎用（generic）にとどまる', () => {
+  const sql = 'THIS IS NOT VALID SQL AT ALL ???undefined_garbage%%%';
+  const d = detectDialect(sql);
+  assert.equal(d.dialect, 'generic');
+  assert.equal(d.reason, 'undetermined');
+});
+
+test('機能B: 空文字列はdialect=nullを返す（判定自体を行わない）', () => {
+  const d = detectDialect('   ');
+  assert.equal(d.dialect, null);
+});
+
+test('機能B: PL/SQLユニット構造だけでもoracleのマーカーとして加点される', () => {
+  const sql = 'BEGIN\n  UPDATE emp SET sal = sal * 1.1 WHERE emp_id = 1;\n  COMMIT;\nEND;\n/';
+  const d = detectDialect(sql);
+  assert.equal(d.dialect, 'oracle');
+  assert.ok(d.markers.includes('PL/SQLユニット構造'));
 });
 
 // ---------------------------------------------------------------------------

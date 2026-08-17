@@ -380,8 +380,37 @@ const DML_KINDS = new Set(['INSERT', 'UPDATE', 'DELETE']);
 // 「警告なし」に見えてしまう文（MERGE / EXEC / CALL など）を検出したら、
 // 必ず1つは警告を出す。「レビューしたのに何も言わなかった」を防ぐのが目的。
 
-const UNANALYZED_STATEMENT_TITLE = '⚠ この文は解析できませんでした（チェック未実施）';
-const UNANALYZED_STATEMENT_MESSAGE = 'この文は解析できませんでした。チェックは行われていません。MERGE等の未対応構文が含まれます。目視での確認が必要です。';
+// P2（プロダクトオーナー指摘）: 「構文解析はできないが簡易チェックは併走させた」
+// 場合と「簡易チェックすら適用できなかった」場合で文言・カードの縁取りを変える。
+// checkLevel:
+//  - 'basic' : 構文解析（AST/日本語要約）はできなかったが、正規表現ベースの簡易
+//              チェック（ON句有無・OR 1=1・LIKE前方一致・破壊的キーワード検出等）
+//              は必ず実施した。カードは warning 系の縁取りに留める。
+//  - 'none'  : 簡易チェックすら適用できなかった（例: PL/SQLブロックからDMLを
+//              1本も抽出できず、動的SQL等で中身が全く見えない場合）。この場合
+//              だけ、従来通りdanger系の縁取りで強く目立たせる。
+const UNANALYZED_STATEMENT_TITLE_NONE = '⚠ この文は解析できませんでした（チェック未実施）';
+const UNANALYZED_STATEMENT_MESSAGE_NONE = 'この文は解析できませんでした。チェックは行われていません。MERGE等の未対応構文が含まれます。目視での確認が必要です。';
+
+const UNANALYZED_STATEMENT_TITLE_BASIC = '⚠ 構文解析はできませんでした（簡易チェックのみ実施）';
+const UNANALYZED_STATEMENT_MESSAGE_BASIC = '構文解析はできませんでした（簡易チェックのみ実施）。構文解析による要約・詳細検査は行われていません。';
+
+// 後方互換のためのエイリアス（従来コードやコメントが参照している名前）
+const UNANALYZED_STATEMENT_TITLE = UNANALYZED_STATEMENT_TITLE_NONE;
+const UNANALYZED_STATEMENT_MESSAGE = UNANALYZED_STATEMENT_MESSAGE_NONE;
+
+/**
+ * 「解析できなかった文」のfindingを組み立てる。checkLevelをfinding.metaに
+ * 残しておき、UI（app.js）がカードの縁取り色を切り替えられるようにする。
+ */
+function mkUnanalyzed(checkLevel, extraMessage) {
+  const title = checkLevel === 'basic' ? UNANALYZED_STATEMENT_TITLE_BASIC : UNANALYZED_STATEMENT_TITLE_NONE;
+  const baseMessage = checkLevel === 'basic' ? UNANALYZED_STATEMENT_MESSAGE_BASIC : UNANALYZED_STATEMENT_MESSAGE_NONE;
+  const message = extraMessage ? `${baseMessage} ${extraMessage}` : baseMessage;
+  const finding = mk('warning', 'unanalyzed-statement', title, message);
+  finding.meta = { checkLevel };
+  return finding;
+}
 
 // kindがOTHERになる文のうち、破壊的な操作につながりうるキーワードを含む場合に
 // 警告を出す対象にする（MERGEは専用kindで判定するためここでは主にEXEC系）。
@@ -389,6 +418,28 @@ const UNANALYZED_DESTRUCTIVE_KEYWORDS = ['MERGE', 'EXEC', 'EXECUTE', 'SP_EXECUTE
 
 function hasUnanalyzedDestructiveKeyword(masked) {
   return topLevelSearch(masked, UNANALYZED_DESTRUCTIVE_KEYWORDS, 0) !== null;
+}
+
+/**
+ * 文字列リテラル外の「1=1」「'a'='a'」のような常に真になる式を、WHERE句の
+ * ような特定の構造を前提とせず文全体から広く拾う（機能A: OTHER文向け簡易チェック）。
+ * masked は文字列リテラルの中身が x でマスクされているため、数値の「1=1」等は
+ * masked 側で拾えば文字列リテラルの中身を誤検知しない。引用符付き文字列同士の
+ * 比較（'a'='a'）は masked 側だと中身がすべて x になり値の異同が分からなくなる
+ * ため、こちらは plain（コメントは空白化済み・文字列の中身はそのまま）を使う。
+ */
+function findGenericTautologies(masked, plain) {
+  const hits = [];
+  const numRe = /(-?\d+(?:\.\d+)?)\s*=\s*(-?\d+(?:\.\d+)?)/g;
+  let m;
+  while ((m = numRe.exec(masked))) {
+    if (m[1] === m[2]) hits.push(`${m[1]}=${m[2]}`);
+  }
+  const strRe = /'([^']*)'\s*=\s*'([^']*)'/g;
+  while ((m = strRe.exec(plain))) {
+    if (m[1] === m[2]) hits.push(`'${m[1]}'='${m[2]}'`);
+  }
+  return hits;
 }
 
 // ---------------------------------------------------------------------------
@@ -588,6 +639,187 @@ function buildImplicitConversionMessage(list) {
   const example = `\`${first.column}\` ${first.op} '${first.value}'`;
   const label = list.length > 1 ? `${example} など${list.length}箇所` : example;
   return `数値に見える値が文字列リテラルとして比較されています（${label}）。方言によっては暗黙的な型変換が行われ、インデックスが使われなくなったり、意図しない一致・不一致が起きることがあります。文字コード列（ゼロ埋めコードなど）への文字列比較はそれ自体正しい書き方です。数値列との比較の場合のみ、列の型を確認してください。`;
+}
+
+// ---------------------------------------------------------------------------
+// MERGE文の簡易チェック（機能A: チェックゼロの文の撲滅）
+// ---------------------------------------------------------------------------
+//
+// MERGEはAST基盤の検出ルールを持たず、これまでは「解析できませんでした」警告を
+// 出すだけで中身を一切見ていなかった（＝チェックゼロ）。ここでは構文解析はできな
+// くても、正規表現ベースの簡易チェックだけは必ず併走させる:
+//  - ON句（結合条件）の有無
+//  - WHEN MATCHED THEN UPDATE の SET句 / WHERE句、WHEN NOT MATCHED THEN INSERT
+//    のINSERT句 / WHERE句を切り出し、既存のWHERE句簡易検査（OR 1=1・LIKE前方
+//    一致でない・括弧なしOR/AND混在・引用符付き数値リテラル）を適用
+//  - WHEN MATCHED ... DELETE（Oracle式の埋め込みDELETE、T-SQL式の単独DELETE
+//    アクションどちらも）を検出したらinfoで明示
+//
+// 完全なMERGE構文パーサではないため、崩れた/未対応の書き方は検出を諦める
+// （誤検知を出すくらいなら検出を諦める、という既存方針を踏襲）。
+
+/** WHERE句と同じ簡易検査（tautology / OR-AND混在 / LIKE前方一致 / 引用符付き数値）
+ *  を任意の切り出したクローズ（maskedClause/plainClause）に適用する。
+ *  MERGEのSET句・WHERE句・INSERT句など、通常のWHERE句以外の場所にも使い回す。 */
+function buildClauseExpressionFindings(maskedClause, plainClause, contextLabel) {
+  const out = [];
+  const trimmedPlain = plainClause.trim();
+
+  if ((trimmedPlain && isTautologyClause(trimmedPlain)) || hasTopLevelTautologyOr(maskedClause, plainClause)) {
+    out.push(mk(
+      'danger',
+      'always-true-where',
+      `常に真になる条件が含まれています（${contextLabel}）`,
+      `${contextLabel}に、「1=1」や「'a'='a'」のように常に真となる条件が含まれている、または他の条件とトップレベルのORでつながっています。事実上絞り込みが効いていないのと同じです。意図した条件が抜けていないか確認してください。`
+    ));
+  }
+  if (hasUnparenthesizedOrAnd(maskedClause)) {
+    out.push(mk(
+      'warning',
+      'or-no-parens',
+      `OR条件に括弧がありません（${contextLabel}）`,
+      `${contextLabel}にある「a=1 OR b=2 AND c=3」のような条件は、ANDがORより先に評価されるため意図せず対象範囲が広がることがあります。括弧で優先順位を明示してください（例: a=1 OR (b=2 AND c=3)）。`
+    ));
+  }
+  if (hasLeadingWildcardLike(plainClause)) {
+    out.push(mk(
+      'warning',
+      'like-leading-wildcard',
+      `前方一致でないLIKE条件です（${contextLabel}）`,
+      `${contextLabel}に LIKE '%...' のように先頭が % で始まるパターンがあります。想定より広い範囲の行がヒットする可能性があるため、目視で確認してください。`
+    ));
+  }
+  const quotedNumeric = findQuotedNumericComparisons(plainClause);
+  if (quotedNumeric.length > 0) {
+    out.push(mk(
+      'info',
+      'implicit-conversion',
+      `引用符付き数値リテラルとの比較です（${contextLabel}）`,
+      buildImplicitConversionMessage(quotedNumeric)
+    ));
+  }
+  return out;
+}
+
+/**
+ * MERGE文1本を対象にした簡易チェック。ON句の有無・各WHEN句のSET/WHERE/INSERT
+ * 部分への式レベルチェック・埋め込みDELETEの検出をまとめて行う。
+ */
+function analyzeMergeStatement(masked, plain) {
+  const findings = [];
+
+  // ON句（結合条件）の有無。最初のWHENより前で、トップレベルのONを探す。
+  const firstWhen = topLevelSearch(masked, ['WHEN'], 0);
+  const onSearchEnd = firstWhen ? firstWhen.index : masked.length;
+  const onHit = topLevelSearch(masked.slice(0, onSearchEnd), ['ON'], 0);
+  if (!onHit) {
+    findings.push(mk(
+      'warning',
+      'merge-missing-on',
+      'MERGEの結合条件（ON句）が見当たりません',
+      '結合条件が確認できません。MERGEのON句が省略されているか、簡易チェックで認識できない形になっている可能性があります。想定通りの行だけがMATCHED / NOT MATCHEDと判定されているか、目視で確認してください。'
+    ));
+  }
+
+  // WHEN句をトップレベルで分割する（複数のWHEN MATCHED / WHEN NOT MATCHEDに対応）。
+  const whenStarts = [];
+  {
+    let searchStart = 0;
+    // eslint-disable-next-line no-constant-condition
+    while (true) {
+      const hit = topLevelSearch(masked, ['WHEN'], searchStart);
+      if (!hit) break;
+      whenStarts.push(hit.index);
+      searchStart = hit.index + hit.length;
+    }
+  }
+
+  let hasDeleteAction = false;
+
+  whenStarts.forEach((start, i) => {
+    const end = i + 1 < whenStarts.length ? whenStarts[i + 1] : masked.length;
+    const segMasked = masked.slice(start, end);
+    const segPlain = plain.slice(start, end);
+
+    const notMatched = /^WHEN\s+NOT\s+MATCHED\b/i.test(segMasked);
+    const label = notMatched ? 'WHEN NOT MATCHED THEN INSERT' : 'WHEN MATCHED THEN UPDATE';
+
+    const thenHit = topLevelSearch(segMasked, ['THEN'], 0);
+    if (!thenHit) return; // THENが見当たらない崩れた構文は判定を諦める（安全側）
+
+    const actionStart = thenHit.index + thenHit.length;
+    const actionMasked = segMasked.slice(actionStart);
+    const actionPlain = segPlain.slice(actionStart);
+
+    const updateMatch = /^\s*UPDATE\b/i.exec(actionMasked);
+    const deleteMatch = /^\s*DELETE\b/i.exec(actionMasked);
+    const insertMatch = /^\s*INSERT\b/i.exec(actionMasked);
+
+    if (updateMatch) {
+      const setHit = topLevelSearch(actionMasked, ['SET'], updateMatch[0].length);
+      if (setHit) {
+        const setBodyStart = setHit.index + setHit.length;
+        // Oracle形式の埋め込みDELETE: WHEN MATCHED THEN UPDATE SET ... [WHERE ...] DELETE WHERE ...
+        const embeddedDeleteHit = topLevelSearch(actionMasked, ['DELETE'], setBodyStart);
+        if (embeddedDeleteHit) hasDeleteAction = true;
+        const actionEnd = embeddedDeleteHit ? embeddedDeleteHit.index : actionMasked.length;
+
+        const whereHit = topLevelSearch(actionMasked, ['WHERE'], setBodyStart);
+        const whereIdx = whereHit && whereHit.index < actionEnd ? whereHit.index : -1;
+        const setEnd = whereIdx !== -1 ? whereIdx : actionEnd;
+
+        findings.push(...buildClauseExpressionFindings(
+          actionMasked.slice(setBodyStart, setEnd),
+          actionPlain.slice(setBodyStart, setEnd),
+          `MERGEの${label} SET句`
+        ));
+
+        if (whereIdx !== -1) {
+          const whereBodyStart = whereIdx + whereHit.length;
+          findings.push(...buildClauseExpressionFindings(
+            actionMasked.slice(whereBodyStart, actionEnd),
+            actionPlain.slice(whereBodyStart, actionEnd),
+            `MERGEの${label} WHERE句`
+          ));
+        }
+      }
+    } else if (deleteMatch) {
+      // T-SQL形式: WHEN MATCHED THEN DELETE（SETを伴わない単独のDELETEアクション）
+      hasDeleteAction = true;
+    } else if (insertMatch) {
+      const insertBodyStart = insertMatch[0].length;
+      // OracleはINSERT句の末尾に任意のWHEREを付けられる（WHEN NOT MATCHED THEN
+      // INSERT (...) VALUES (...) WHERE ...）。あれば切り出して個別にチェックする。
+      const whereHit = topLevelSearch(actionMasked, ['WHERE'], insertBodyStart);
+      const insertEnd = whereHit ? whereHit.index : actionMasked.length;
+
+      findings.push(...buildClauseExpressionFindings(
+        actionMasked.slice(insertBodyStart, insertEnd),
+        actionPlain.slice(insertBodyStart, insertEnd),
+        `MERGEの${label} INSERT句`
+      ));
+
+      if (whereHit) {
+        const whereBodyStart = whereHit.index + whereHit.length;
+        findings.push(...buildClauseExpressionFindings(
+          actionMasked.slice(whereBodyStart),
+          actionPlain.slice(whereBodyStart),
+          `MERGEの${label} WHERE句`
+        ));
+      }
+    }
+  });
+
+  if (hasDeleteAction) {
+    findings.push(mk(
+      'info',
+      'merge-has-delete',
+      '削除句を含むMERGE',
+      'このMERGEにはDELETEを伴う分岐が含まれています。UPDATEやINSERTだけでなく行の削除も発生します。削除対象の範囲が意図通りか、目視で確認してください。'
+    ));
+  }
+
+  return findings;
 }
 
 // ---------------------------------------------------------------------------
@@ -934,8 +1166,7 @@ function analyzePlsqlUnit(unitText, dialect) {
     // 抽出モジュールが読み込まれていない場合は、従来どおり「丸ごと解析対象外」。
     return {
       kind: 'PLSQL_UNIT',
-      findings: [mk('warning', 'unanalyzed-statement', UNANALYZED_STATEMENT_TITLE,
-        `${UNANALYZED_STATEMENT_MESSAGE} PL/SQLブロックの中身は解析していません。`)],
+      findings: [mkUnanalyzed('none', 'PL/SQLブロックの中身は解析していません。')],
       verifySelect: null,
       verifySelectHasJoin: false,
       masked, plain, summary: null, ast: null,
@@ -972,8 +1203,7 @@ function analyzePlsqlUnit(unitText, dialect) {
   if (items.length === 0 && info.hasExecutableBody) {
     // 実行可能な本体があるのにDMLを1本も切り出せなかった場合だけ、従来どおりの
     // 「解析できませんでした」警告に倒す（沈黙素通りを防ぐのが目的）。
-    findings.push(mk('warning', 'unanalyzed-statement', UNANALYZED_STATEMENT_TITLE,
-      `${UNANALYZED_STATEMENT_MESSAGE} PL/SQLブロックからDMLを1本も抽出できませんでした（動的SQLなどの可能性があります）。中身を目視で確認してください。`));
+    findings.push(mkUnanalyzed('none', 'PL/SQLブロックからDMLを1本も抽出できませんでした（動的SQLなどの可能性があります）。中身を目視で確認してください。'));
   } else if (items.length === 0) {
     findings.push(mk('info', 'plsql-declaration-only',
       'DMLを含まない宣言部です',
@@ -1240,23 +1470,34 @@ function analyzeStatementByRegex(rawStmt, dialect, ctx) {
     // MERGEは専用の構文解析・検出ルールを持たない。何も言わずに通すと「レビュー
     // したのに何も指摘がなかった＝安全」と誤解されるのが最悪のため、findingsが
     // 空でも必ず警告を出す（P1: 解析不能文の沈黙素通り対策）。
-    findings.push(mk(
-      'warning',
-      'unanalyzed-statement',
-      UNANALYZED_STATEMENT_TITLE,
-      `${UNANALYZED_STATEMENT_MESSAGE} MERGE文の解析は未対応です。`
-    ));
-  } else if (kind === 'OTHER' && findings.length === 0 && hasUnanalyzedDestructiveKeyword(masked)) {
-    // kindがOTHER（＝正規表現でも文種別を特定できなかった）で、かつ破壊的な
-    // 操作を伴いうるキーワード（EXEC/CALL等のプロシージャ実行など）を含む場合も
-    // 同様に沈黙素通りを防ぐ。findings.length===0のチェックは、将来OTHER種別に
-    // 他のルールが追加されたときに警告が二重・矛盾しないようにするための保険。
-    findings.push(mk(
-      'warning',
-      'unanalyzed-statement',
-      UNANALYZED_STATEMENT_TITLE,
-      UNANALYZED_STATEMENT_MESSAGE
-    ));
+    // 機能A: 構文解析はできなくても、ON句の有無やSET/WHERE/INSERT部分の式レベル
+    // 簡易チェックは必ず併走させる（analyzeMergeStatement）。そのため checkLevel
+    // は常に 'basic'（簡易チェックのみ実施）になる。
+    findings.push(...analyzeMergeStatement(masked, plain));
+    findings.push(mkUnanalyzed('basic', 'MERGE文の解析は未対応です。ON句や各WHEN句のSET/WHERE/INSERT部分には正規表現ベースの簡易チェックを適用しています。'));
+  } else if (kind === 'OTHER') {
+    // kindがOTHER（＝正規表現でも文種別を特定できなかった）文にも、必ず簡易
+    // チェックだけは併走させる（機能A）。文字列リテラル外の「1=1」等の常に真に
+    // なる式は、破壊的キーワードの有無に関わらず検出する。
+    const tautologyHits = findGenericTautologies(masked, plain);
+    if (tautologyHits.length > 0) {
+      findings.push(mk(
+        'warning',
+        'always-true-where',
+        '常に真になる式が含まれています',
+        `文字列リテラル外に「${tautologyHits[0]}」のように常に真となる式が含まれています。条件式の一部として使われている場合、意図した絞り込みが抜けていないか確認してください。`
+      ));
+    }
+
+    if (hasUnanalyzedDestructiveKeyword(masked)) {
+      // 破壊的な操作を伴いうるキーワード（EXEC/CALL等のプロシージャ実行など）を
+      // 含む場合は、上記の簡易チェックを実施した上でも構文解析はできていない旨を
+      // 必ず警告する（P1: 解析不能文の沈黙素通り対策）。
+      findings.push(mkUnanalyzed(
+        'basic',
+        'MERGE/EXEC/EXECUTE/SP_EXECUTESQL/CALL等の破壊的なキーワードを含む文です。構文解析はできないため、文字列リテラル外の「1=1」等の式レベル簡易チェックのみを行っています。'
+      ));
+    }
   }
 
   let verifySelectRaw = null;
@@ -1585,6 +1826,10 @@ const _internal = {
   analyzePlsqlUnit,
   buildRawStatements,
   SCRIPT_MODE_MIN_STATEMENTS,
+  findGenericTautologies,
+  analyzeMergeStatement,
+  buildClauseExpressionFindings,
+  mkUnanalyzed,
 };
 
 // ---------------------------------------------------------------------------

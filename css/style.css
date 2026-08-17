@@ -334,6 +334,19 @@ body {
   background: var(--danger-bg);
 }
 
+/* 機能A: 構文解析はできなかったが正規表現の簡易チェックは併走させた文
+   （MERGE・EXEC等の破壊的キーワードを含むOTHER文）は、簡易チェックすら
+   適用できなかった文（.stmt-card-unanalyzed）より一段階弱いwarning系の
+   縁取りにする。チェックゼロの場合だけdanger系で強く目立たせる方針。 */
+.stmt-card-unanalyzed-basic {
+  border-color: var(--warning-border);
+  box-shadow: 0 0 0 1px var(--warning-border);
+}
+
+.stmt-card-unanalyzed-basic .stmt-card-head {
+  background: var(--warning-bg);
+}
+
 .stmt-card-head {
   display: flex;
   align-items: center;
@@ -676,6 +689,33 @@ body {
 /* ---------------------------------------------------------------------------
    v2: 解析レベルのバッジ / スクリプト全体サマリ / 日本語要約カード
    --------------------------------------------------------------------------- */
+
+/* 機能B: 方言の自動判定バッジ。結果の先頭に必ず表示し、判定根拠を明示する
+   （M2の教訓: 自動判定は外したときに気づけないと事故に直結するため）。 */
+.auto-dialect-notice {
+  display: flex;
+  align-items: baseline;
+  flex-wrap: wrap;
+  gap: 8px;
+  margin-bottom: 10px;
+  padding: 10px 14px;
+  border: 1px solid var(--info-border);
+  border-radius: var(--radius);
+  background: var(--info-bg);
+  font-size: 0.82rem;
+  color: var(--text);
+  line-height: 1.7;
+}
+
+.auto-dialect-badge {
+  font-size: 0.72rem;
+  font-weight: 700;
+  padding: 3px 9px;
+  border-radius: 999px;
+  border: 1px solid var(--info-border);
+  color: var(--info);
+  white-space: nowrap;
+}
 
 .analysis-level {
   display: flex;

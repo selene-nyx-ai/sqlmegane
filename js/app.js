@@ -9,6 +9,7 @@
 // 保証している。
 
 const { analyzeSQL, collectPlsqlFindings } = globalThis.SQLMeganeAnalyzer;
+const { detectDialect } = globalThis.SQLMeganeDialectDetect || {};
 
 const els = {
   input: document.getElementById('sql-input'),
@@ -44,6 +45,7 @@ const DIALECT_LABELS = {
   mssql: 'SQL Server',
   mysql: 'MySQL',
   postgres: 'PostgreSQL',
+  auto: '自動判定',
 };
 
 const PARSER_LABELS = {
@@ -266,9 +268,21 @@ function renderParserSwapNotice(parse, dialect) {
  * 解析できなかった文（MERGE / PL/SQLブロック / インラインビューUPDATE等）は
  * findings が空・要約なしでも「警告なし」に見えないよう、カード自体を危険色系の
  * 縁取りにする（P1: 沈黙素通り対策。「安全に見える」のを防ぐのが目的）。
+ *
+ * 機能A: 「構文解析はできないが正規表現の簡易チェックは併走させた」文（checkLevel
+ * 'basic'。例: MERGE、EXEC等の破壊的キーワードを含むOTHER文）と、「簡易チェックすら
+ * 適用できなかった」文（checkLevel 'none'。例: 動的SQLでDMLを1本も抽出できなかった
+ * PL/SQLブロック）とで、カードの縁取りの強さを変える。前者はwarning系、後者は
+ * 従来通りdanger系で目立たせる。
  */
+function unanalyzedCheckLevel(stmt) {
+  const f = stmt.findings.find((f) => f.code === 'unanalyzed-statement');
+  if (!f) return null;
+  return (f.meta && f.meta.checkLevel) || 'none';
+}
+
 function isUnanalyzedStatement(stmt) {
-  return stmt.findings.some((f) => f.code === 'unanalyzed-statement');
+  return unanalyzedCheckLevel(stmt) !== null;
 }
 
 // ---------------------------------------------------------------------------
@@ -324,7 +338,12 @@ function renderPlsqlStructure(plsql) {
 }
 
 function renderStatementCard(stmt, dialect) {
-  const cardClass = isUnanalyzedStatement(stmt) ? 'stmt-card stmt-card-unanalyzed' : 'stmt-card';
+  const checkLevel = unanalyzedCheckLevel(stmt);
+  const cardClass = checkLevel === 'none'
+    ? 'stmt-card stmt-card-unanalyzed'
+    : checkLevel === 'basic'
+      ? 'stmt-card stmt-card-unanalyzed-basic'
+      : 'stmt-card';
   const card = el('div', { className: cardClass, attrs: { id: `stmt-${stmt.number}` } });
 
   // PL/SQLユニットは、自分自身のfindings（制御フロー未解析の注記など）だけでなく
@@ -387,6 +406,42 @@ function renderStatementCard(stmt, dialect) {
   }
 
   return card;
+}
+
+// ---------------------------------------------------------------------------
+// 機能B: 方言の自動判定バッジ
+// ---------------------------------------------------------------------------
+//
+// M2の教訓（プロジェクトメモリ）: 自動判定は「当たっていれば便利」だが、外した
+// ときに気づけないと事故に直結する。結果の先頭に必ずバッジを出し、判定根拠
+// （ヒットしたマーカー最大3個）を添えて、誤っていたら選び直せることを明示する。
+
+/** detectDialectの戻り値から、バッジに表示する「判定根拠」の文言を組み立てる */
+function buildAutoDetectReasonText(detection, resolvedLabel) {
+  switch (detection.reason) {
+    case 'heuristic':
+      return detection.markers.length > 0
+        ? detection.markers.join('・')
+        : `${resolvedLabel}らしい特徴`;
+    case 'parse-success-single':
+      return `方言固有のキーワードは見つかりませんでしたが、${resolvedLabel}のパーサで構文解析に成功しました`;
+    case 'parse-success-ambiguous':
+      return '複数方言のパーサで解析に成功したANSI互換SQLと判断し、MySQLとして扱っています（方言固有のヒントは表示していません）';
+    case 'undetermined':
+    default:
+      return '方言を特定できる手がかりが見つかりませんでした';
+  }
+}
+
+function renderAutoDialectNotice(detection, resolvedDialect) {
+  const label = DIALECT_LABELS[resolvedDialect] || resolvedDialect;
+  const reasonText = buildAutoDetectReasonText(detection, label);
+  const wrap = el('div', { className: 'auto-dialect-notice' });
+  wrap.appendChild(el('span', { className: 'auto-dialect-badge', text: '自動判定' }));
+  wrap.appendChild(el('span', {
+    text: `自動判定: ${label} として解析しました（根拠: ${reasonText}）。誤っている場合は方言を選び直してください`,
+  }));
+  return wrap;
 }
 
 // ---------------------------------------------------------------------------
@@ -496,7 +551,7 @@ function renderGlobalFindings(globalFindings) {
 
 function render() {
   const sql = els.input.value;
-  const dialect = els.dialect.value;
+  const selectedDialect = els.dialect.value;
 
   els.results.innerHTML = '';
 
@@ -505,11 +560,39 @@ function render() {
     return;
   }
 
+  // 機能B: セレクタが「自動判定」のときだけ検出を実行し、実際の解析には
+  // 検出結果が指す具体的な方言（oracle/mssql/mysql/postgres/generic）を使う。
+  // セレクタを手動で具体的な方言に変更した場合は、従来通りその方言をそのまま
+  // 使う（自動判定は一切介入しない＝手動優先）。
+  let dialect = selectedDialect;
+  let autoDetection = null;
+  if (selectedDialect === 'auto') {
+    autoDetection = typeof detectDialect === 'function' ? detectDialect(sql) : null;
+    dialect = (autoDetection && autoDetection.dialect) || 'generic';
+  }
+
   const result = analyzeSQL(sql, dialect);
 
   if (result.statements.length === 0) {
     els.results.appendChild(el('p', { className: 'empty-state', text: '有効なSQL文が見つかりませんでした。' }));
     return;
+  }
+
+  if (autoDetection) {
+    els.results.appendChild(renderAutoDialectNotice(autoDetection, dialect));
+    if (autoDetection.reason === 'parse-success-ambiguous') {
+      // 複数方言のパーサで解析に成功したANSI互換SQLの可能性が高いケース。
+      // AST解析のためにmysqlへ解決してはいるが「mysqlだと言い切れる根拠」は
+      // 無いため、mysql固有のTips（LIMIT句の案内）だけは表示しない。
+      for (const stmt of result.statements) {
+        stmt.findings = stmt.findings.filter((f) => f.code !== 'mysql-no-limit');
+        if (stmt.plsql) {
+          for (const item of stmt.plsql.items) {
+            item.findings = item.findings.filter((f) => f.code !== 'mysql-no-limit');
+          }
+        }
+      }
+    }
   }
 
   els.results.appendChild(renderAnalysisBadge(result));
