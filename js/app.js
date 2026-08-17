@@ -8,7 +8,8 @@
 // 順に読み込むことで、この時点で SQLMeganeAnalyzer が必ず定義済みであることを
 // 保証している。
 
-const { analyzeSQL } = globalThis.SQLMeganeAnalyzer;
+const { analyzeSQL, collectPlsqlFindings } = globalThis.SQLMeganeAnalyzer;
+const { detectDialect } = globalThis.SQLMeganeDialectDetect || {};
 
 const els = {
   input: document.getElementById('sql-input'),
@@ -32,10 +33,26 @@ const KIND_LABELS = {
   ALTER: 'ALTER',
   BEGIN_TX: 'BEGIN / トランザクション開始',
   END_TX: 'COMMIT / ROLLBACK',
+  PLSQL_UNIT: 'PL/SQLユニット',
   OTHER: 'その他',
 };
 
 const SEVERITY_LABELS = { danger: '危険', warning: '注意', info: '情報' };
+
+const DIALECT_LABELS = {
+  generic: '汎用',
+  oracle: 'Oracle',
+  mssql: 'SQL Server',
+  mysql: 'MySQL',
+  postgres: 'PostgreSQL',
+  auto: '自動判定',
+};
+
+const PARSER_LABELS = {
+  mysql: 'MySQL',
+  postgresql: 'PostgreSQL',
+  transactsql: 'SQL Server (T-SQL)',
+};
 
 let debounceTimer = null;
 
@@ -113,38 +130,185 @@ async function copyToClipboard(text, btn) {
   }
 }
 
-function renderVerifySelect(sql) {
+/**
+ * 検算SELECTのカード。JOINを含む場合（hasJoin）は、表示件数が「結合行数」であり
+ * 1対多のJOINでは実際の更新・削除対象の行数より大きくなりうることを、ラベルと
+ * 注記の両方で明示する（生成SQL自体にも同内容のコメントが入っている）。
+ */
+function renderVerifySelect(sql, hasJoin, hasRuntimeVariable) {
   const wrap = el('div', { className: 'verify-select' });
   const head = el('div', { className: 'verify-select-head' });
-  head.appendChild(el('span', { className: 'verify-select-label', text: '検算SELECT（実行前に対象件数を確認）' }));
+  const labelText = hasJoin
+    ? '検算SELECT（実行前に対象件数を確認・JOINのため結合行数です）'
+    : '検算SELECT（実行前に対象件数を確認）';
+  head.appendChild(el('span', { className: 'verify-select-label', text: labelText }));
   const copyBtn = el('button', { className: 'btn btn-copy', text: 'コピー', attrs: { type: 'button' } });
   copyBtn.addEventListener('click', () => copyToClipboard(sql, copyBtn));
   head.appendChild(copyBtn);
   wrap.appendChild(head);
+  if (hasJoin) {
+    wrap.appendChild(el('p', {
+      className: 'verify-select-note',
+      text: '※JOINを含むため結合行数です。1対多の結合では実際の更新行数より大きくなることがあります。',
+    }));
+  }
+  // PL/SQL内部から抽出したDMLは、WHERE句にPL/SQL変数やバインド変数が残る。
+  // そのままでは実行できないので、置き換えが必要なことを明示する。
+  if (hasRuntimeVariable) {
+    wrap.appendChild(el('p', {
+      className: 'verify-select-note',
+      text: '※WHERE句にPL/SQLの変数・バインド変数が含まれています。:変数 部分は実行時の値に置き換えてください。',
+    }));
+  }
   const pre = el('pre');
   pre.textContent = sql;
   wrap.appendChild(pre);
   return wrap;
 }
 
-function renderStatementCard(stmt) {
-  const card = el('div', { className: 'stmt-card' });
+// ---------------------------------------------------------------------------
+// 日本語要約カード（v2の主役。警告より上に表示する）
+// ---------------------------------------------------------------------------
 
-  const headRow = el('div', { className: 'stmt-card-head' });
+function renderConditionList(items, depth) {
+  const ul = el('ul', { className: depth === 0 ? 'summary-conditions' : 'summary-conditions-nested' });
+  for (const item of items) {
+    const li = el('li');
+    li.appendChild(document.createTextNode(item.text));
+    if (item.children && item.children.length > 0) {
+      li.appendChild(renderConditionList(item.children, depth + 1));
+    }
+    ul.appendChild(li);
+  }
+  return ul;
+}
+
+function renderSummaryBlock(block) {
+  if (block.type === 'list') {
+    const wrap = el('div', { className: 'summary-block' });
+    if (block.title) wrap.appendChild(el('p', { className: 'summary-list-title', text: `${block.title}:` }));
+    wrap.appendChild(renderConditionList(block.items, 0));
+    return wrap;
+  }
+  const cls = block.type === 'alert'
+    ? 'summary-line summary-alert'
+    : block.type === 'join'
+      ? 'summary-line summary-join'
+      : 'summary-line';
+  return el('p', { className: cls, text: block.text });
+}
+
+/**
+ * 見出しは一文統合要約。summarizer が headlineParts（強調フラグ付きの断片）を
+ * 返す場合はそれを使い、「全行」のような危険な語を <strong> で立たせる。
+ * 断片が無い場合（将来の互換）はプレーンな headline をそのまま出す。
+ */
+function renderHeadline(summary) {
+  const p = el('p', { className: 'summary-headline' });
+  const parts = Array.isArray(summary.headlineParts) ? summary.headlineParts : null;
+  if (!parts || parts.length === 0) {
+    p.textContent = summary.headline;
+    return p;
+  }
+  for (const part of parts) {
+    if (part.strong) p.appendChild(el('strong', { className: 'summary-emphasis', text: part.text }));
+    else p.appendChild(document.createTextNode(part.text));
+  }
+  return p;
+}
+
+function renderSummary(summary) {
+  const card = el('div', { className: 'stmt-summary' });
+  const head = el('div', { className: 'summary-head' });
+  head.appendChild(el('span', { className: 'summary-label', text: 'このSQLがすること' }));
+  head.appendChild(el('span', { className: 'summary-op', text: summary.op }));
+  card.appendChild(head);
+  card.appendChild(renderHeadline(summary));
+  for (const block of summary.blocks) {
+    card.appendChild(renderSummaryBlock(block));
+  }
+  return card;
+}
+
+/** パースに失敗して正規表現の簡易チェックに落ちたことを明示する */
+function renderFallbackNotice(parse) {
+  const line = parse.error && parse.error.globalLine != null
+    ? parse.error.globalLine
+    : (parse.error ? parse.error.line : null);
+  const where = line != null ? `（位置: 行${line}）` : '';
+  const note = el('div', { className: 'parse-notice' });
+  note.appendChild(el('span', { className: 'parse-notice-badge', text: '簡易チェック' }));
+  note.appendChild(el('span', {
+    text: `構文解析に失敗したため簡易チェックで表示しています${where}。日本語要約は表示されず、検出も正規表現ベースの簡易判定になります。`,
+  }));
+  return note;
+}
+
+/**
+ * 別方言（mysql）のパーサで再挑戦して解析に成功したことを明示する。
+ * 「参考表示」程度の軽い扱いにすると、選択方言では構文エラーになるSQLでも
+ * あたかも正常に解析できたかのように見えてしまうため、選択方言では構文エラー
+ * だったという事実を warning として必ず表示する（位置つき）。
+ */
+function renderParserSwapNotice(parse, dialect) {
+  const selectedLabel = DIALECT_LABELS[dialect] || dialect;
+  const fallbackLabel = PARSER_LABELS[parse.parserDialect] || parse.parserDialect;
+  const err = parse.primaryError;
+  const line = err && err.globalLine != null ? err.globalLine : (err ? err.line : null);
+  const where = line != null ? `（位置: 行${line}）` : '';
+  const note = el('div', { className: 'parse-notice parse-notice-warning' });
+  note.appendChild(el('span', { className: 'parse-notice-badge', text: '⚠ 方言不一致' }));
+  note.appendChild(el('span', {
+    text: `選択した方言（${selectedLabel}）では構文エラーです${where}。別方言（${fallbackLabel}）として解釈した参考表示です。このSQLは選択した方言では実行できない可能性があります。`,
+  }));
+  return note;
+}
+
+/**
+ * 解析できなかった文（MERGE / PL/SQLブロック / インラインビューUPDATE等）は
+ * findings が空・要約なしでも「警告なし」に見えないよう、カード自体を危険色系の
+ * 縁取りにする（P1: 沈黙素通り対策。「安全に見える」のを防ぐのが目的）。
+ *
+ * 機能A: 「構文解析はできないが正規表現の簡易チェックは併走させた」文（checkLevel
+ * 'basic'。例: MERGE、EXEC等の破壊的キーワードを含むOTHER文）と、「簡易チェックすら
+ * 適用できなかった」文（checkLevel 'none'。例: 動的SQLでDMLを1本も抽出できなかった
+ * PL/SQLブロック）とで、カードの縁取りの強さを変える。前者はwarning系、後者は
+ * 従来通りdanger系で目立たせる。
+ */
+function unanalyzedCheckLevel(stmt) {
+  const f = stmt.findings.find((f) => f.code === 'unanalyzed-statement');
+  if (!f) return null;
+  return (f.meta && f.meta.checkLevel) || 'none';
+}
+
+function isUnanalyzedStatement(stmt) {
+  return unanalyzedCheckLevel(stmt) !== null;
+}
+
+// ---------------------------------------------------------------------------
+// PL/SQLユニット（Oracle対応 Phase 1）
+// ---------------------------------------------------------------------------
+
+/** 抽出したDML1本ぶんのサブカード。通常の文カードと同じ内容（findings・検算SELECT）を出す */
+function renderPlsqlItem(item, index, stmtNumber) {
+  const card = el('div', { className: 'plsql-item', attrs: { id: `stmt-${stmtNumber}-item-${index + 1}` } });
+
+  const headRow = el('div', { className: 'plsql-item-head' });
   const title = el('div', { className: 'stmt-title' });
-  title.appendChild(el('span', { className: 'stmt-number', text: `文 ${stmt.number}` }));
-  title.appendChild(el('span', { className: 'stmt-kind', text: KIND_LABELS[stmt.kind] || stmt.kind }));
+  title.appendChild(el('span', { className: 'stmt-number', text: `抽出 ${index + 1}` }));
+  const labelText = item.cursorName ? `${item.label}: ${item.cursorName}` : item.label;
+  title.appendChild(el('span', { className: 'stmt-kind', text: labelText }));
   headRow.appendChild(title);
-  renderSeverityChips(headRow, countBySeverity(stmt.findings));
+  renderSeverityChips(headRow, countBySeverity(item.findings));
   card.appendChild(headRow);
 
   const sqlPre = el('pre', { className: 'stmt-sql' });
-  sqlPre.textContent = stmt.raw;
+  sqlPre.textContent = item.sql;
   card.appendChild(sqlPre);
 
-  if (stmt.findings.length > 0) {
+  if (item.findings.length > 0) {
     const list = el('div', { className: 'findings-list' });
-    for (const f of stmt.findings) list.appendChild(renderFinding(f));
+    for (const f of item.findings) list.appendChild(renderFinding(f));
     card.appendChild(list);
   } else {
     const note = el('div', { className: 'no-findings-note' });
@@ -154,11 +318,326 @@ function renderStatementCard(stmt) {
     card.appendChild(note);
   }
 
-  if (stmt.verifySelect) {
-    card.appendChild(renderVerifySelect(stmt.verifySelect));
+  if (item.verifySelect) {
+    card.appendChild(renderVerifySelect(
+      item.verifySelect,
+      !!item.verifySelectHasJoin,
+      !!item.verifySelectHasRuntimeVariable
+    ));
   }
 
   return card;
+}
+
+/** PL/SQLユニットの構造サマリ（何が何個あって、DMLを何本抽出したか） */
+function renderPlsqlStructure(plsql) {
+  const wrap = el('div', { className: 'plsql-structure' });
+  wrap.appendChild(el('p', { className: 'plsql-structure-head', text: `PL/SQLユニット: ${plsql.header}` }));
+  wrap.appendChild(el('p', { className: 'plsql-structure-line', text: plsql.structure }));
+  return wrap;
+}
+
+function renderStatementCard(stmt, dialect) {
+  const checkLevel = unanalyzedCheckLevel(stmt);
+  const cardClass = checkLevel === 'none'
+    ? 'stmt-card stmt-card-unanalyzed'
+    : checkLevel === 'basic'
+      ? 'stmt-card stmt-card-unanalyzed-basic'
+      : 'stmt-card';
+  const card = el('div', { className: cardClass, attrs: { id: `stmt-${stmt.number}` } });
+
+  // PL/SQLユニットは、自分自身のfindings（制御フロー未解析の注記など）だけでなく
+  // 抽出したDMLのfindingsも数に入れないと、カード見出しが「危険の検出なし」に
+  // 見えてしまう（中のUPDATEがWHERE漏れでも気づけない）。
+  const headlineFindings = stmt.plsql
+    ? stmt.findings.concat(collectPlsqlFindings(stmt))
+    : stmt.findings;
+
+  const headRow = el('div', { className: 'stmt-card-head' });
+  const title = el('div', { className: 'stmt-title' });
+  title.appendChild(el('span', { className: 'stmt-number', text: `文 ${stmt.number}` }));
+  title.appendChild(el('span', { className: 'stmt-kind', text: KIND_LABELS[stmt.kind] || stmt.kind }));
+  headRow.appendChild(title);
+  renderSeverityChips(headRow, countBySeverity(headlineFindings));
+  card.appendChild(headRow);
+
+  if (stmt.plsql) {
+    card.appendChild(renderPlsqlStructure(stmt.plsql));
+  }
+
+  const sqlPre = el('pre', { className: 'stmt-sql' });
+  sqlPre.textContent = stmt.raw;
+  card.appendChild(sqlPre);
+
+  if (stmt.parse && stmt.parse.mode === 'fallback') {
+    card.appendChild(renderFallbackNotice(stmt.parse));
+  } else if (stmt.parse && stmt.parse.usedFallbackDialect) {
+    card.appendChild(renderParserSwapNotice(stmt.parse, dialect));
+  }
+
+  if (stmt.summary) {
+    card.appendChild(renderSummary(stmt.summary));
+  }
+
+  if (stmt.findings.length > 0) {
+    const list = el('div', { className: 'findings-list' });
+    for (const f of stmt.findings) list.appendChild(renderFinding(f));
+    card.appendChild(list);
+  } else if (!stmt.plsql) {
+    const note = el('div', { className: 'no-findings-note' });
+    note.appendChild(document.createTextNode('明らかな危険は検出されませんでした'));
+    const small = el('small', { text: '（検出できない危険もあります。最終判断は必ず人間が行ってください）' });
+    note.appendChild(small);
+    card.appendChild(note);
+  }
+
+  if (stmt.plsql && stmt.plsql.items.length > 0) {
+    const list = el('div', { className: 'plsql-items' });
+    list.appendChild(el('p', {
+      className: 'plsql-items-title',
+      text: `抽出したDML（${stmt.plsql.items.length}件）— 1本ずつ通常の文と同じチェックをかけています`,
+    }));
+    stmt.plsql.items.forEach((item, i) => list.appendChild(renderPlsqlItem(item, i, stmt.number)));
+    card.appendChild(list);
+  }
+
+  if (stmt.verifySelect) {
+    card.appendChild(renderVerifySelect(stmt.verifySelect, !!stmt.verifySelectHasJoin, false));
+  }
+
+  return card;
+}
+
+// ---------------------------------------------------------------------------
+// 機能B: 方言の自動判定バッジ
+// ---------------------------------------------------------------------------
+//
+// M2の教訓（プロジェクトメモリ）: 自動判定は「当たっていれば便利」だが、外した
+// ときに気づけないと事故に直結する。結果の先頭に必ずバッジを出し、判定根拠
+// （ヒットしたマーカー最大3個）を添えて、誤っていたら選び直せることを明示する。
+
+/** detectDialectの戻り値から、バッジに表示する「判定根拠」の文言を組み立てる */
+function buildAutoDetectReasonText(detection, resolvedLabel) {
+  switch (detection.reason) {
+    case 'heuristic':
+      return detection.markers.length > 0
+        ? detection.markers.join('・')
+        : `${resolvedLabel}らしい特徴`;
+    case 'parse-success-single':
+      return `方言固有のキーワードは見つかりませんでしたが、${resolvedLabel}のパーサで構文解析に成功しました`;
+    case 'parse-success-ambiguous':
+      return '複数方言のパーサで解析に成功したANSI互換SQLと判断し、MySQLとして扱っています（方言固有のヒントは表示していません）';
+    case 'undetermined':
+    default:
+      return '方言を特定できる手がかりが見つかりませんでした';
+  }
+}
+
+function renderAutoDialectNotice(detection, resolvedDialect) {
+  const label = DIALECT_LABELS[resolvedDialect] || resolvedDialect;
+  const reasonText = buildAutoDetectReasonText(detection, label);
+  const wrap = el('div', { className: 'auto-dialect-notice' });
+  wrap.appendChild(el('span', { className: 'auto-dialect-badge', text: '自動判定' }));
+  wrap.appendChild(el('span', {
+    text: `自動判定: ${label} として解析しました（根拠: ${reasonText}）。誤っている場合は方言を選び直してください`,
+  }));
+  return wrap;
+}
+
+// ---------------------------------------------------------------------------
+// 解析レベルのバッジ（方言によってASTか簡易チェックかが変わることを明示する）
+// ---------------------------------------------------------------------------
+
+function renderAnalysisBadge(result) {
+  const wrap = el('div', { className: 'analysis-level' });
+  const dialectLabel = DIALECT_LABELS[result.dialect] || result.dialect;
+
+  if (result.analysis && result.analysis.astSupported) {
+    wrap.appendChild(el('span', { className: 'analysis-badge ast', text: '構文解析あり' }));
+    const fb = result.analysis.fallbackStatements;
+    wrap.appendChild(el('span', {
+      className: 'analysis-note',
+      text: fb > 0
+        ? `${dialectLabel} のパーサでSQLを解析し、日本語で要約しています（${fb}文はパースできず簡易チェックに切り替えました）。`
+        : `${dialectLabel} のパーサでSQLを解析し、日本語で要約しています。`,
+    }));
+  } else {
+    wrap.appendChild(el('span', { className: 'analysis-badge simple', text: '簡易チェック（構文解析なし）' }));
+    wrap.appendChild(el('span', {
+      className: 'analysis-note',
+      text: `${dialectLabel} は同梱パーサが対応していないため、正規表現ベースの簡易チェックのみを行います（日本語要約は表示されません）。MySQL / PostgreSQL / SQL Server を選ぶと構文解析付きで確認できます。`,
+    }));
+  }
+  return wrap;
+}
+
+// ---------------------------------------------------------------------------
+// スクリプトモード（複数文をまとめて貼ったときの全体サマリ）
+// ---------------------------------------------------------------------------
+
+const OVERVIEW_KIND_ORDER = ['UPDATE', 'DELETE', 'INSERT', 'MERGE', 'TRUNCATE_TABLE', 'DROP_TABLE', 'DROP_DATABASE', 'DROP_OTHER', 'ALTER', 'CREATE', 'SELECT'];
+
+function overviewCountsText(counts) {
+  const parts = [];
+  let others = 0;
+  for (const [kind, n] of Object.entries(counts)) {
+    if (OVERVIEW_KIND_ORDER.includes(kind)) continue;
+    others += n;
+  }
+  for (const kind of OVERVIEW_KIND_ORDER) {
+    if (counts[kind]) parts.push(`${KIND_LABELS[kind] || kind} ${counts[kind]}件`);
+  }
+  if (others > 0) parts.push(`その他 ${others}件`);
+  return parts.join(' / ');
+}
+
+// 危険・注意の件数と該当文の一覧は先頭の判定バナー（renderVerdictBanner）に
+// 統合したため、ここでは重複させない。スクリプトモードカードは「触るテーブル
+// 一覧・文の内訳」（＋構文解析できなかった文の一覧）に絞る。
+function renderOverview(overview) {
+  const card = el('div', { className: 'overview-card' });
+  card.appendChild(el('h2', { className: 'overview-title', text: 'スクリプトの内訳' }));
+
+  card.appendChild(el('p', {
+    className: 'overview-line',
+    text: `全${overview.total}文（${overviewCountsText(overview.counts)}）。うち破壊的操作は ${overview.destructiveCount}件です。`,
+  }));
+
+  card.appendChild(el('p', {
+    className: 'overview-line',
+    text: overview.tables.length > 0
+      ? `触るテーブル: ${overview.tables.join(' / ')}`
+      : '触るテーブル: 特定できませんでした',
+  }));
+
+  if (overview.fallbackStatements.length > 0) {
+    card.appendChild(el('p', {
+      className: 'overview-line',
+      text: `構文解析できず簡易チェックになった文: ${overview.fallbackStatements.map((n) => `#${n}`).join(', ')}`,
+    }));
+  }
+
+  if (overview.unanalyzedStatements.length > 0) {
+    const line = el('p', { className: 'overview-line overview-warned' });
+    line.appendChild(document.createTextNode(`⚠ 未解析の文: ${overview.unanalyzedStatements.length}件（`));
+    overview.unanalyzedStatements.forEach((num, i) => {
+      if (i > 0) line.appendChild(document.createTextNode(', '));
+      const a = el('a', { className: 'overview-link', text: `#${num}`, attrs: { href: `#stmt-${num}` } });
+      line.appendChild(a);
+    });
+    line.appendChild(document.createTextNode('）。MERGE等の未対応構文や、DMLを1本も抽出できなかったPL/SQLブロックなどは、チェックが行われていません。目視で確認してください。'));
+    card.appendChild(line);
+  }
+
+  return card;
+}
+
+// ---------------------------------------------------------------------------
+// 判定バナー（結果エリア先頭。プロダクトオーナー指摘: スクロールしないと
+// 全部見きれないから、冒頭に危険/注意/情報が何件あるかを出すべき。
+// ユーザーはできる限りUIを操作したくない設計にする）
+// ---------------------------------------------------------------------------
+//
+// 集計対象は「文それ自身のfindings」「globalFindings（バッチ全体向け）」
+// 「PL/SQLユニット内に抽出したDML（plsql.items）のfindings」の3種類すべて。
+// PL/SQL内の抽出DMLのfindings（カーソルwarning等）を含めないと、冒頭の件数が
+// 実際にレビューすべき件数と食い違ってしまうため必須。
+
+/**
+ * 解析結果全体から、判定バナーに必要な「severity別の件数」と「危険・注意の
+ * ジャンプ先一覧（文番号ラベル → アンカー）」を1回の走査で組み立てる。
+ * globalFindingsは特定の文に紐づかない（＝ジャンプ先アンカーが無い）ため、
+ * 件数には数えるがジャンプ一覧には含めない。
+ * PL/SQL内の抽出DMLは「文N-抽出M」ラベルで、そのサブカード自身のアンカー
+ * （#stmt-N-item-M。renderPlsqlItemが付与）へジャンプする。
+ */
+function computeVerdict(result) {
+  const counts = { danger: 0, warning: 0, info: 0 };
+  const dangerJumps = new Map();
+  const warningJumps = new Map();
+
+  const addJump = (severity, label, anchor) => {
+    if (severity === 'danger') dangerJumps.set(label, anchor);
+    else if (severity === 'warning') warningJumps.set(label, anchor);
+  };
+
+  for (const stmt of result.statements) {
+    for (const f of stmt.findings) {
+      counts[f.severity]++;
+      addJump(f.severity, `文${stmt.number}`, `#stmt-${stmt.number}`);
+    }
+    if (stmt.plsql) {
+      stmt.plsql.items.forEach((item, i) => {
+        for (const f of item.findings) {
+          counts[f.severity]++;
+          addJump(f.severity, `文${stmt.number}-抽出${i + 1}`, `#stmt-${stmt.number}-item-${i + 1}`);
+        }
+      });
+    }
+  }
+  for (const f of result.globalFindings) {
+    counts[f.severity]++;
+  }
+
+  return { counts, dangerJumps, warningJumps };
+}
+
+/** 「危険: 文3・文7」のような、ジャンプリンクを「・」区切りで並べた行を作る */
+function renderVerdictJumpLine(labelPrefix, jumps) {
+  const line = el('p', { className: 'verdict-jump-line' });
+  line.appendChild(document.createTextNode(labelPrefix));
+  let i = 0;
+  for (const [label, anchor] of jumps) {
+    if (i > 0) line.appendChild(document.createTextNode('・'));
+    line.appendChild(el('a', { className: 'verdict-jump-link', text: label, attrs: { href: anchor } }));
+    i++;
+  }
+  return line;
+}
+
+/**
+ * 判定バナー本体。文が1件でも、findingsが0件でも、結果エリアの一番上に
+ * 常に表示する（スクロールせず見える設計にするのが目的なので、条件付きで
+ * 出し分けたりはしない）。
+ */
+function renderVerdictBanner(result) {
+  const { counts, dangerJumps, warningJumps } = computeVerdict(result);
+  const level = counts.danger > 0 ? 'danger' : (counts.warning > 0 ? 'warning' : 'neutral');
+
+  const wrap = el('div', { className: `verdict-banner verdict-${level}`, attrs: { role: 'status' } });
+
+  const headline = el('p', { className: 'verdict-headline' });
+  const segs = [];
+  if (level === 'danger') {
+    segs.push(`🔴 危険 ${counts.danger}件`);
+    segs.push(`⚠ 注意 ${counts.warning}件`);
+    segs.push(`情報 ${counts.info}件`);
+  } else if (level === 'warning') {
+    segs.push(`⚠ 注意 ${counts.warning}件`);
+    segs.push(`情報 ${counts.info}件`);
+  } else {
+    segs.push(`明らかな危険は検出されませんでした（情報 ${counts.info}件）`);
+  }
+  headline.textContent = segs.join(' ／ ');
+  wrap.appendChild(headline);
+
+  if (level === 'danger') {
+    wrap.appendChild(el('p', {
+      className: 'verdict-subtext verdict-subtext-strong',
+      text: '実行前に危険箇所の確認が必要です。',
+    }));
+  } else if (level === 'neutral') {
+    // 過信防止文言（about-panelのdisclaimerと同じ趣旨をバナー内にも明示する）
+    wrap.appendChild(el('p', {
+      className: 'verdict-subtext',
+      text: '「危険が検出されない = 安全」ではありません。検出できない危険もあります。最終判断は必ず人間が行ってください。',
+    }));
+  }
+
+  if (dangerJumps.size > 0) wrap.appendChild(renderVerdictJumpLine('危険: ', dangerJumps));
+  if (warningJumps.size > 0) wrap.appendChild(renderVerdictJumpLine('注意: ', warningJumps));
+
+  return wrap;
 }
 
 function renderGlobalFindings(globalFindings) {
@@ -170,13 +649,24 @@ function renderGlobalFindings(globalFindings) {
 
 function render() {
   const sql = els.input.value;
-  const dialect = els.dialect.value;
+  const selectedDialect = els.dialect.value;
 
   els.results.innerHTML = '';
 
   if (!sql || sql.trim().length === 0) {
     els.results.appendChild(el('p', { className: 'empty-state', text: 'SQLを貼り付けると、ここに解析結果が表示されます。' }));
     return;
+  }
+
+  // 機能B: セレクタが「自動判定」のときだけ検出を実行し、実際の解析には
+  // 検出結果が指す具体的な方言（oracle/mssql/mysql/postgres/generic）を使う。
+  // セレクタを手動で具体的な方言に変更した場合は、従来通りその方言をそのまま
+  // 使う（自動判定は一切介入しない＝手動優先）。
+  let dialect = selectedDialect;
+  let autoDetection = null;
+  if (selectedDialect === 'auto') {
+    autoDetection = typeof detectDialect === 'function' ? detectDialect(sql) : null;
+    dialect = (autoDetection && autoDetection.dialect) || 'generic';
   }
 
   const result = analyzeSQL(sql, dialect);
@@ -186,11 +676,42 @@ function render() {
     return;
   }
 
+  if (autoDetection && autoDetection.reason === 'parse-success-ambiguous') {
+    // 複数方言のパーサで解析に成功したANSI互換SQLの可能性が高いケース。
+    // AST解析のためにmysqlへ解決してはいるが「mysqlだと言い切れる根拠」は
+    // 無いため、mysql固有のTips（LIMIT句の案内）だけは表示しない。
+    // 判定バナーの件数もこのfindingsを見て集計するため、バナーを組み立てる
+    // 前に必ずフィルタしておく。
+    for (const stmt of result.statements) {
+      stmt.findings = stmt.findings.filter((f) => f.code !== 'mysql-no-limit');
+      if (stmt.plsql) {
+        for (const item of stmt.plsql.items) {
+          item.findings = item.findings.filter((f) => f.code !== 'mysql-no-limit');
+        }
+      }
+    }
+  }
+
+  // 判定バナー: 結果エリアの一番先頭（textareaの直下）に常に表示する。
+  // プロダクトオーナー指摘「スクロールしないと全部見きれない」への対応で、
+  // 危険/注意/情報の件数がスクロールなしで即わかることを最優先する。
+  els.results.appendChild(renderVerdictBanner(result));
+
+  if (autoDetection) {
+    els.results.appendChild(renderAutoDialectNotice(autoDetection, dialect));
+  }
+
+  els.results.appendChild(renderAnalysisBadge(result));
+
+  if (result.overview) {
+    els.results.appendChild(renderOverview(result.overview));
+  }
+
   const globalNode = renderGlobalFindings(result.globalFindings);
   if (globalNode) els.results.appendChild(globalNode);
 
   for (const stmt of result.statements) {
-    els.results.appendChild(renderStatementCard(stmt));
+    els.results.appendChild(renderStatementCard(stmt, result.dialect));
   }
 }
 

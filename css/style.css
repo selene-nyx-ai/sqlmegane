@@ -309,6 +309,79 @@ body {
   text-align: center;
 }
 
+/* ---------- 判定バナー（結果エリア先頭。スクロールせず見えることが必須） ---------- */
+/* プロダクトオーナー指摘: 「スクロールしないと全部見きれないから、冒頭に
+   注意や危険などの確認事項が何件あるかを出すべき」。文が1件でもfindingsが
+   0件でも常に表示し、危険>注意>情報の優先順で3段階の色分けをする。 */
+
+.verdict-banner {
+  padding: 14px 16px;
+  border-radius: var(--radius);
+  border: 1px solid;
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+
+.verdict-headline {
+  margin: 0;
+  font-size: 1.02rem;
+  font-weight: 700;
+  line-height: 1.5;
+}
+
+.verdict-subtext {
+  margin: 0;
+  font-size: 0.85rem;
+  line-height: 1.7;
+  color: var(--text-muted);
+}
+
+.verdict-subtext-strong {
+  color: inherit;
+  font-weight: 700;
+}
+
+.verdict-jump-line {
+  margin: 2px 0 0;
+  font-size: 0.85rem;
+  line-height: 1.8;
+}
+
+.verdict-jump-link {
+  color: inherit;
+  font-weight: 700;
+  text-decoration: underline;
+}
+
+.verdict-jump-link:hover {
+  opacity: 0.8;
+}
+
+.verdict-danger {
+  color: var(--danger);
+  background: var(--danger-bg);
+  border-color: var(--danger-border);
+}
+
+.verdict-danger .verdict-subtext { color: var(--danger); }
+
+.verdict-warning {
+  color: var(--warning);
+  background: var(--warning-bg);
+  border-color: var(--warning-border);
+}
+
+.verdict-warning .verdict-subtext { color: var(--warning); }
+
+.verdict-neutral {
+  color: var(--text);
+  background: var(--neutral-bg);
+  border-color: var(--neutral-border);
+}
+
+.verdict-neutral .verdict-headline { color: var(--text); }
+
 .global-findings {
   display: flex;
   flex-direction: column;
@@ -320,6 +393,31 @@ body {
   border: 1px solid var(--panel-border);
   border-radius: var(--radius);
   overflow: hidden;
+}
+
+/* 解析できなかった文（MERGE・PL/SQLブロック・インラインビューUPDATE等）は
+   findingsが少なく「安全に見える」ことがあるため、カード自体を危険色系の
+   縁取りにして、他の通常カードより明らかに目立つようにする。 */
+.stmt-card-unanalyzed {
+  border-color: var(--danger-border);
+  box-shadow: 0 0 0 1px var(--danger-border);
+}
+
+.stmt-card-unanalyzed .stmt-card-head {
+  background: var(--danger-bg);
+}
+
+/* 機能A: 構文解析はできなかったが正規表現の簡易チェックは併走させた文
+   （MERGE・EXEC等の破壊的キーワードを含むOTHER文）は、簡易チェックすら
+   適用できなかった文（.stmt-card-unanalyzed）より一段階弱いwarning系の
+   縁取りにする。チェックゼロの場合だけdanger系で強く目立たせる方針。 */
+.stmt-card-unanalyzed-basic {
+  border-color: var(--warning-border);
+  box-shadow: 0 0 0 1px var(--warning-border);
+}
+
+.stmt-card-unanalyzed-basic .stmt-card-head {
+  background: var(--warning-bg);
 }
 
 .stmt-card-head {
@@ -397,6 +495,72 @@ body {
   padding: 14px 16px;
 }
 
+/* ------------------------------------------------------------------ */
+/* PL/SQLユニット（Oracle対応 Phase 1）                                */
+/* ------------------------------------------------------------------ */
+
+/* 構造サマリ: 「PACKAGE BODY pkg_x / プロシージャ2個 / 抽出したDML: ...」 */
+.plsql-structure {
+  padding: 12px 16px;
+  background: var(--info-bg);
+  border-bottom: 1px solid var(--panel-border-soft);
+}
+
+.plsql-structure-head {
+  margin: 0 0 4px;
+  font-weight: 700;
+  font-size: 0.9rem;
+  color: var(--text);
+  word-break: break-word;
+}
+
+.plsql-structure-line {
+  margin: 0;
+  font-size: 0.83rem;
+  line-height: 1.7;
+  color: var(--text-muted);
+  word-break: break-word;
+}
+
+/* 抽出したDMLのサブカード群 */
+.plsql-items {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+  padding: 14px 16px;
+}
+
+.plsql-items-title {
+  margin: 0;
+  font-size: 0.82rem;
+  font-weight: 700;
+  color: var(--text-muted);
+}
+
+.plsql-item {
+  border: 1px solid var(--panel-border);
+  border-radius: 8px;
+  overflow: hidden;
+  background: var(--panel);
+}
+
+.plsql-item-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+  flex-wrap: wrap;
+  padding: 10px 14px;
+  background: var(--bg-elevated);
+  border-bottom: 1px solid var(--panel-border-soft);
+  font-size: 0.85rem;
+  color: var(--text-muted);
+}
+
+.plsql-item .stmt-sql {
+  max-height: 160px;
+}
+
 .finding {
   border-radius: 8px;
   border: 1px solid;
@@ -472,6 +636,13 @@ body {
   color: var(--text-muted);
   text-transform: uppercase;
   letter-spacing: 0.03em;
+}
+
+.verify-select-note {
+  margin: 0 0 8px;
+  font-size: 0.78rem;
+  line-height: 1.7;
+  color: var(--warning);
 }
 
 .verify-select pre {
@@ -587,3 +758,231 @@ body {
     color-scheme: dark;
   }
 }
+
+/* ---------------------------------------------------------------------------
+   v2: 解析レベルのバッジ / スクリプト全体サマリ / 日本語要約カード
+   --------------------------------------------------------------------------- */
+
+/* 機能B: 方言の自動判定バッジ。結果の先頭に必ず表示し、判定根拠を明示する
+   （M2の教訓: 自動判定は外したときに気づけないと事故に直結するため）。 */
+.auto-dialect-notice {
+  display: flex;
+  align-items: baseline;
+  flex-wrap: wrap;
+  gap: 8px;
+  margin-bottom: 10px;
+  padding: 10px 14px;
+  border: 1px solid var(--info-border);
+  border-radius: var(--radius);
+  background: var(--info-bg);
+  font-size: 0.82rem;
+  color: var(--text);
+  line-height: 1.7;
+}
+
+.auto-dialect-badge {
+  font-size: 0.72rem;
+  font-weight: 700;
+  padding: 3px 9px;
+  border-radius: 999px;
+  border: 1px solid var(--info-border);
+  color: var(--info);
+  white-space: nowrap;
+}
+
+.analysis-level {
+  display: flex;
+  align-items: baseline;
+  flex-wrap: wrap;
+  gap: 8px;
+  margin-bottom: 14px;
+  padding: 10px 14px;
+  border: 1px solid var(--panel-border);
+  border-radius: var(--radius);
+  background: var(--bg-elevated);
+}
+
+.analysis-badge {
+  font-size: 0.72rem;
+  font-weight: 700;
+  padding: 3px 9px;
+  border-radius: 999px;
+  border: 1px solid;
+  white-space: nowrap;
+}
+
+.analysis-badge.ast { color: var(--accent); background: rgba(79, 163, 255, 0.12); border-color: rgba(79, 163, 255, 0.35); }
+.analysis-badge.simple { color: var(--neutral); background: var(--neutral-bg); border-color: var(--neutral-border); }
+
+.analysis-note {
+  font-size: 0.8rem;
+  color: var(--text-muted);
+  line-height: 1.7;
+}
+
+.overview-card {
+  margin-bottom: 16px;
+  padding: 14px 16px;
+  border: 1px solid var(--panel-border);
+  border-radius: var(--radius);
+  background: var(--panel);
+}
+
+.overview-title {
+  margin: 0 0 8px;
+  font-size: 0.95rem;
+  color: var(--text);
+}
+
+.overview-line {
+  margin: 4px 0;
+  font-size: 0.85rem;
+  color: var(--text-muted);
+  line-height: 1.8;
+  word-break: break-word;
+}
+
+.overview-warned { color: var(--warning); }
+
+.overview-link {
+  color: var(--accent);
+  font-weight: 700;
+  text-decoration: none;
+}
+
+.overview-link:hover { text-decoration: underline; }
+
+.parse-notice {
+  display: flex;
+  align-items: baseline;
+  gap: 8px;
+  flex-wrap: wrap;
+  margin: 0;
+  padding: 10px 16px;
+  font-size: 0.8rem;
+  line-height: 1.7;
+  color: var(--text-muted);
+  background: var(--neutral-bg);
+  border-bottom: 1px solid var(--panel-border-soft);
+}
+
+.parse-notice-badge {
+  font-size: 0.7rem;
+  font-weight: 700;
+  padding: 2px 8px;
+  border-radius: 999px;
+  color: var(--neutral);
+  border: 1px solid var(--neutral-border);
+  white-space: nowrap;
+}
+
+/* 別方言（mysql）で再挑戦して解析した結果を「選択方言では構文エラー」とはっきり
+   伝えるための警告色の注記（review指摘M2: 「参考」程度の軽い扱いだと、選択方言
+   では実行できないSQLをあたかも正常に解析できたかのように見せてしまうため）。 */
+.parse-notice-warning {
+  color: var(--warning);
+  background: var(--warning-bg);
+  border-bottom-color: var(--warning-border);
+}
+
+.parse-notice-warning .parse-notice-badge {
+  color: var(--warning);
+  border-color: var(--warning-border);
+}
+
+.stmt-summary {
+  padding: 14px 16px;
+  border-bottom: 1px solid var(--panel-border-soft);
+  background: rgba(79, 163, 255, 0.05);
+}
+
+.summary-head {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin-bottom: 8px;
+}
+
+.summary-label {
+  font-size: 0.75rem;
+  font-weight: 700;
+  letter-spacing: 0.04em;
+  color: var(--accent);
+}
+
+.summary-op {
+  font-family: var(--font-mono);
+  font-size: 0.72rem;
+  font-weight: 700;
+  padding: 2px 8px;
+  border-radius: 5px;
+  color: var(--accent);
+  background: rgba(79, 163, 255, 0.12);
+  border: 1px solid rgba(79, 163, 255, 0.35);
+}
+
+.summary-headline {
+  margin: 0 0 8px;
+  font-size: 0.95rem;
+  font-weight: 700;
+  line-height: 1.8;
+  color: var(--text);
+  word-break: break-word;
+}
+
+/* 見出しの中で「全行」のような取り返しのつかない範囲を立たせる */
+.summary-emphasis {
+  color: var(--danger);
+  background: var(--danger-bg);
+  border-radius: 4px;
+  padding: 0 4px;
+}
+
+.summary-line {
+  margin: 5px 0;
+  font-size: 0.85rem;
+  line-height: 1.9;
+  color: var(--text-muted);
+  word-break: break-word;
+}
+
+.summary-join {
+  padding: 8px 12px;
+  border-left: 3px solid var(--accent);
+  border-radius: 0 6px 6px 0;
+  background: rgba(79, 163, 255, 0.07);
+  color: var(--text);
+}
+
+.summary-alert {
+  padding: 8px 12px;
+  border-left: 3px solid var(--danger);
+  border-radius: 0 6px 6px 0;
+  background: var(--danger-bg);
+  color: var(--danger);
+  font-weight: 700;
+}
+
+.summary-block { margin: 6px 0; }
+
+.summary-list-title {
+  margin: 0 0 4px;
+  font-size: 0.8rem;
+  color: var(--text-faint);
+}
+
+.summary-conditions,
+.summary-conditions-nested {
+  margin: 0;
+  padding-left: 1.35em;
+  font-size: 0.85rem;
+  line-height: 1.9;
+  color: var(--text-muted);
+}
+
+.summary-conditions-nested {
+  margin-top: 2px;
+  border-left: 1px dashed var(--panel-border);
+}
+
+.summary-conditions li { word-break: break-word; }
