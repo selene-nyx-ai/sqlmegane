@@ -37,6 +37,20 @@ const KIND_LABELS = {
 
 const SEVERITY_LABELS = { danger: '危険', warning: '注意', info: '情報' };
 
+const DIALECT_LABELS = {
+  generic: '汎用',
+  oracle: 'Oracle',
+  mssql: 'SQL Server',
+  mysql: 'MySQL',
+  postgres: 'PostgreSQL',
+};
+
+const PARSER_LABELS = {
+  mysql: 'MySQL',
+  postgresql: 'PostgreSQL',
+  transactsql: 'SQL Server (T-SQL)',
+};
+
 let debounceTimer = null;
 
 function el(tag, opts) {
@@ -127,8 +141,78 @@ function renderVerifySelect(sql) {
   return wrap;
 }
 
+// ---------------------------------------------------------------------------
+// 日本語要約カード（v2の主役。警告より上に表示する）
+// ---------------------------------------------------------------------------
+
+function renderConditionList(items, depth) {
+  const ul = el('ul', { className: depth === 0 ? 'summary-conditions' : 'summary-conditions-nested' });
+  for (const item of items) {
+    const li = el('li');
+    li.appendChild(document.createTextNode(item.text));
+    if (item.children && item.children.length > 0) {
+      li.appendChild(renderConditionList(item.children, depth + 1));
+    }
+    ul.appendChild(li);
+  }
+  return ul;
+}
+
+function renderSummaryBlock(block) {
+  if (block.type === 'list') {
+    const wrap = el('div', { className: 'summary-block' });
+    if (block.title) wrap.appendChild(el('p', { className: 'summary-list-title', text: `${block.title}:` }));
+    wrap.appendChild(renderConditionList(block.items, 0));
+    return wrap;
+  }
+  const cls = block.type === 'alert'
+    ? 'summary-line summary-alert'
+    : block.type === 'join'
+      ? 'summary-line summary-join'
+      : 'summary-line';
+  return el('p', { className: cls, text: block.text });
+}
+
+function renderSummary(summary) {
+  const card = el('div', { className: 'stmt-summary' });
+  const head = el('div', { className: 'summary-head' });
+  head.appendChild(el('span', { className: 'summary-label', text: 'このSQLがすること' }));
+  head.appendChild(el('span', { className: 'summary-op', text: summary.op }));
+  card.appendChild(head);
+  card.appendChild(el('p', { className: 'summary-headline', text: summary.headline }));
+  for (const block of summary.blocks) {
+    card.appendChild(renderSummaryBlock(block));
+  }
+  return card;
+}
+
+/** パースに失敗して正規表現の簡易チェックに落ちたことを明示する */
+function renderFallbackNotice(parse) {
+  const line = parse.error && parse.error.globalLine != null
+    ? parse.error.globalLine
+    : (parse.error ? parse.error.line : null);
+  const where = line != null ? `（位置: 行${line}）` : '';
+  const note = el('div', { className: 'parse-notice' });
+  note.appendChild(el('span', { className: 'parse-notice-badge', text: '簡易チェック' }));
+  note.appendChild(el('span', {
+    text: `構文解析に失敗したため簡易チェックで表示しています${where}。日本語要約は表示されず、検出も正規表現ベースの簡易判定になります。`,
+  }));
+  return note;
+}
+
+/** 方言差を吸収するために別方言のパーサで解析したことを明示する */
+function renderParserSwapNotice(parse) {
+  const label = PARSER_LABELS[parse.parserDialect] || parse.parserDialect;
+  const note = el('div', { className: 'parse-notice parse-notice-soft' });
+  note.appendChild(el('span', { className: 'parse-notice-badge', text: '参考' }));
+  note.appendChild(el('span', {
+    text: `選択中の方言のパーサでは解析できなかったため、${label} のパーサで解析した結果を表示しています。`,
+  }));
+  return note;
+}
+
 function renderStatementCard(stmt) {
-  const card = el('div', { className: 'stmt-card' });
+  const card = el('div', { className: 'stmt-card', attrs: { id: `stmt-${stmt.number}` } });
 
   const headRow = el('div', { className: 'stmt-card-head' });
   const title = el('div', { className: 'stmt-title' });
@@ -141,6 +225,16 @@ function renderStatementCard(stmt) {
   const sqlPre = el('pre', { className: 'stmt-sql' });
   sqlPre.textContent = stmt.raw;
   card.appendChild(sqlPre);
+
+  if (stmt.parse && stmt.parse.mode === 'fallback') {
+    card.appendChild(renderFallbackNotice(stmt.parse));
+  } else if (stmt.parse && stmt.parse.usedFallbackDialect) {
+    card.appendChild(renderParserSwapNotice(stmt.parse));
+  }
+
+  if (stmt.summary) {
+    card.appendChild(renderSummary(stmt.summary));
+  }
 
   if (stmt.findings.length > 0) {
     const list = el('div', { className: 'findings-list' });
@@ -156,6 +250,92 @@ function renderStatementCard(stmt) {
 
   if (stmt.verifySelect) {
     card.appendChild(renderVerifySelect(stmt.verifySelect));
+  }
+
+  return card;
+}
+
+// ---------------------------------------------------------------------------
+// 解析レベルのバッジ（方言によってASTか簡易チェックかが変わることを明示する）
+// ---------------------------------------------------------------------------
+
+function renderAnalysisBadge(result) {
+  const wrap = el('div', { className: 'analysis-level' });
+  const dialectLabel = DIALECT_LABELS[result.dialect] || result.dialect;
+
+  if (result.analysis && result.analysis.astSupported) {
+    wrap.appendChild(el('span', { className: 'analysis-badge ast', text: '構文解析あり' }));
+    const fb = result.analysis.fallbackStatements;
+    wrap.appendChild(el('span', {
+      className: 'analysis-note',
+      text: fb > 0
+        ? `${dialectLabel} のパーサでSQLを解析し、日本語で要約しています（${fb}文はパースできず簡易チェックに切り替えました）。`
+        : `${dialectLabel} のパーサでSQLを解析し、日本語で要約しています。`,
+    }));
+  } else {
+    wrap.appendChild(el('span', { className: 'analysis-badge simple', text: '簡易チェック（構文解析なし）' }));
+    wrap.appendChild(el('span', {
+      className: 'analysis-note',
+      text: `${dialectLabel} は同梱パーサが対応していないため、正規表現ベースの簡易チェックのみを行います（日本語要約は表示されません）。MySQL / PostgreSQL / SQL Server を選ぶと構文解析付きで確認できます。`,
+    }));
+  }
+  return wrap;
+}
+
+// ---------------------------------------------------------------------------
+// スクリプトモード（複数文をまとめて貼ったときの全体サマリ）
+// ---------------------------------------------------------------------------
+
+const OVERVIEW_KIND_ORDER = ['UPDATE', 'DELETE', 'INSERT', 'MERGE', 'TRUNCATE_TABLE', 'DROP_TABLE', 'DROP_DATABASE', 'DROP_OTHER', 'ALTER', 'CREATE', 'SELECT'];
+
+function overviewCountsText(counts) {
+  const parts = [];
+  let others = 0;
+  for (const [kind, n] of Object.entries(counts)) {
+    if (OVERVIEW_KIND_ORDER.includes(kind)) continue;
+    others += n;
+  }
+  for (const kind of OVERVIEW_KIND_ORDER) {
+    if (counts[kind]) parts.push(`${KIND_LABELS[kind] || kind} ${counts[kind]}件`);
+  }
+  if (others > 0) parts.push(`その他 ${others}件`);
+  return parts.join(' / ');
+}
+
+function renderOverview(overview) {
+  const card = el('div', { className: 'overview-card' });
+  card.appendChild(el('h2', { className: 'overview-title', text: 'スクリプト全体のサマリ' }));
+
+  card.appendChild(el('p', {
+    className: 'overview-line',
+    text: `全${overview.total}文（${overviewCountsText(overview.counts)}）。うち破壊的操作は ${overview.destructiveCount}件です。`,
+  }));
+
+  card.appendChild(el('p', {
+    className: 'overview-line',
+    text: overview.tables.length > 0
+      ? `触るテーブル: ${overview.tables.join(' / ')}`
+      : '触るテーブル: 特定できませんでした',
+  }));
+
+  if (overview.warnedStatements.length > 0) {
+    const line = el('p', { className: 'overview-line overview-warned' });
+    line.appendChild(document.createTextNode('⚠ 警告のある文: '));
+    overview.warnedStatements.forEach((num, i) => {
+      if (i > 0) line.appendChild(document.createTextNode(', '));
+      const a = el('a', { className: 'overview-link', text: `#${num}`, attrs: { href: `#stmt-${num}` } });
+      line.appendChild(a);
+    });
+    card.appendChild(line);
+  } else {
+    card.appendChild(el('p', { className: 'overview-line', text: '危険・注意レベルの検出があった文はありません（検出できない危険もあります）。' }));
+  }
+
+  if (overview.fallbackStatements.length > 0) {
+    card.appendChild(el('p', {
+      className: 'overview-line',
+      text: `構文解析できず簡易チェックになった文: ${overview.fallbackStatements.map((n) => `#${n}`).join(', ')}`,
+    }));
   }
 
   return card;
@@ -184,6 +364,12 @@ function render() {
   if (result.statements.length === 0) {
     els.results.appendChild(el('p', { className: 'empty-state', text: '有効なSQL文が見つかりませんでした。' }));
     return;
+  }
+
+  els.results.appendChild(renderAnalysisBadge(result));
+
+  if (result.overview) {
+    els.results.appendChild(renderOverview(result.overview));
   }
 
   const globalNode = renderGlobalFindings(result.globalFindings);

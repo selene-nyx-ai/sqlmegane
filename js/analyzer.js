@@ -9,8 +9,14 @@
  * 公開する（経緯は README.md / docs/architecture.md を参照）。
  *
  * 重要な設計方針:
- *  - ここは "パーサ" ではなく "正規表現 + 簡易な状態機械" によるヒューリスティックです。
- *    複雑な SQL を 100% 正しく解析することはできません（README / docs/architecture.md 参照）。
+ *  - v2 から、MySQL / PostgreSQL / SQL Server の3方言については同梱パーサ
+ *    （js/vendor/node-sql-parser-*.js）でASTを取り、AST基盤の検出ルール
+ *    （js/ast-rules.js）と日本語要約（js/summarizer.js）を使う。
+ *  - パースできない場合（Oracle・汎用、または構文がパーサの対応外だった場合）は、
+ *    このファイルが元々持っている "正規表現 + 簡易な状態機械" のヒューリスティックに
+ *    フォールバックする。フォールバックしたことは結果に含めてUIで明示する。
+ *  - 正規表現側は "パーサ" ではないため、複雑な SQL を 100% 正しく解析することは
+ *    できません（README / docs/architecture.md 参照）。
  *  - 誤検知（false positive）を出すくらいなら検出を諦める、という方針で実装しています。
  *  - 入力された SQL 文字列はこのファイル内で完結して処理され、どこにも送信されません。
  */
@@ -143,13 +149,14 @@ function scan(stmt, dialect) {
  * dialect が 'mysql' の場合、文字列リテラル内のバックスラッシュエスケープを
  * 認識する（scan() と同じ方針。詳細はそちらのコメント参照）。
  */
-function splitStatements(sql, dialect) {
+function splitStatementsWithOffsets(sql, dialect) {
   const mysqlEscapes = dialect === 'mysql';
   const statements = [];
   let i = 0;
   const n = sql.length;
   let state = 'normal';
   let start = 0;
+  const push = (from, to) => statements.push({ raw: sql.slice(from, to), start: from });
 
   while (i < n) {
     const c = sql[i];
@@ -162,7 +169,7 @@ function splitStatements(sql, dialect) {
       if (c === '[') { state = 'bracket'; i++; continue; }
       if (c === '-' && c2 === '-') { state = 'line'; i += 2; continue; }
       if (c === '/' && c2 === '*') { state = 'block'; i += 2; continue; }
-      if (c === ';') { statements.push(sql.slice(start, i)); i++; start = i; continue; }
+      if (c === ';') { push(start, i); i++; start = i; continue; }
       i++; continue;
     }
     if (state === 'single') {
@@ -195,13 +202,32 @@ function splitStatements(sql, dialect) {
       i++; continue;
     }
   }
-  if (start < n) statements.push(sql.slice(start));
+  if (start < n) push(start, n);
 
   return statements
-    .map((s) => s.trim())
-    .filter((s) => s.length > 0)
+    .map((s) => {
+      // trim した分だけ開始位置をずらす（構文エラー位置を元テキストの行番号へ
+      // 変換するために、文の開始オフセットを正確に保つ必要がある）
+      const leading = s.raw.length - s.raw.replace(/^\s+/, '').length;
+      return { raw: s.raw.trim(), start: s.start + leading };
+    })
+    .filter((s) => s.raw.length > 0)
     // コメントだけの文（例: "-- foo"）は実質空文なので除外する
-    .filter((s) => scan(s, dialect).plain.trim().length > 0);
+    .filter((s) => scan(s.raw, dialect).plain.trim().length > 0);
+}
+
+/** 従来通り文字列の配列を返す公開API（互換維持） */
+function splitStatements(sql, dialect) {
+  return splitStatementsWithOffsets(sql, dialect).map((s) => s.raw);
+}
+
+function lineNumberAt(text, offset) {
+  if (offset == null || offset < 0) return 1;
+  let line = 1;
+  for (let i = 0; i < offset && i < text.length; i++) {
+    if (text[i] === '\n') line++;
+  }
+  return line;
 }
 
 // ---------------------------------------------------------------------------
@@ -641,6 +667,64 @@ function buildVerifySelect(kind, masked, whereInfo) {
   return `SELECT COUNT(*) FROM ${tableExpr};`;
 }
 
+/**
+ * AST が取れている場合の「行の供給元（FROM句相当）」のソース範囲を返す。
+ *
+ * 検算SELECTのために必要なのは「テーブル式のテキスト」そのもの（JOINやON句を
+ * 含む）だが、ASTから元のSQLテキストを完全に復元すると引用符の付き方が変わって
+ * 読みにくくなる。そこで「どこがテーブル式なのか」の判断だけASTに任せ、
+ * 文字列自体は元のSQLから切り出す。
+ *
+ * これにより、正規表現版では壊れていた次のケースが正しく検算できるようになる:
+ *   - `UPDATE t1 LEFT JOIN t2 ON ... SET ...`（MySQLのマルチテーブルUPDATE）
+ *   - `UPDATE u SET ... FROM users u JOIN ... WHERE ...`（T-SQL）
+ *   - `DELETE o FROM orders o JOIN ...`
+ */
+function findTableExprRange(kind, masked, hasFromClause) {
+  const bodyStart = findCteBodyStart(masked);
+  const lead = masked.slice(bodyStart);
+  const leadOffset = bodyStart + (lead.length - lead.replace(/^\s+/, '').length);
+  const s = masked.slice(leadOffset);
+
+  let start = -1;
+  if (hasFromClause) {
+    const f = topLevelSearch(s, ['FROM'], 0);
+    if (!f) return null;
+    start = f.index + f.length;
+  } else if (kind === 'UPDATE') {
+    const m = s.match(/^UPDATE\s+/i);
+    if (!m) return null;
+    start = m[0].length;
+  } else if (kind === 'DELETE') {
+    const f = topLevelSearch(s, ['FROM'], 0);
+    if (!f) return null;
+    start = f.index + f.length;
+  } else {
+    return null;
+  }
+
+  const endWords = ['SET', 'WHERE'].concat(WHERE_END_WORDS);
+  const e = topLevelSearchValidated(s, endWords, start, isValidWhereEndMatch);
+  const end = e ? e.index : s.length;
+  if (end <= start) return null;
+  return { start: leadOffset + start, end: leadOffset + end };
+}
+
+function buildVerifySelectFromAst(kind, ast, masked, plain, whereInfo) {
+  const A = globalThis.SQLMeganeSqlAst;
+  if (!A || !ast) return null;
+  const hasFromClause = Array.isArray(ast.from) && ast.from.length > 0;
+  const range = findTableExprRange(kind, masked, hasFromClause);
+  if (!range) return null;
+  const tableExpr = plain.slice(range.start, range.end).trim().replace(/\s+/g, ' ');
+  if (tableExpr.length === 0) return null;
+  if (whereInfo) {
+    const cond = whereInfo.plainClause.trim().replace(/\s+/g, ' ');
+    if (cond.length > 0) return `SELECT COUNT(*) FROM ${tableExpr} WHERE ${cond};`;
+  }
+  return `SELECT COUNT(*) FROM ${tableExpr};`;
+}
+
 // ---------------------------------------------------------------------------
 // finding ヘルパー
 // ---------------------------------------------------------------------------
@@ -696,11 +780,71 @@ function isSingleEqualityWhere(maskedClause) {
 // 文単位の解析
 // ---------------------------------------------------------------------------
 
+// AST の文種別 ↔ 正規表現側の文種別の対応（両者が食い違う場合はASTルールを使わない）
+const AST_TYPE_TO_KIND = { update: 'UPDATE', delete: 'DELETE' };
+
+/**
+ * 1文を解析する。
+ *
+ * 手順:
+ *  1. 方言がAST対応（MySQL/PostgreSQL/SQL Server）かつパーサが読み込まれていれば
+ *     パースを試みる。失敗したら（調査で判明している方言差を吸収するため）
+ *     mysql方言のパーサでもう一度だけ試す。
+ *  2. パース成功 → 日本語要約 + AST基盤ルール + AST基盤の検算SELECT。
+ *  3. パース失敗・方言非対応 → 従来の正規表現ヒューリスティック。
+ *     失敗の場合はエラー位置を parse.error に入れてUIで明示できるようにする。
+ */
 function analyzeStatement(rawStmt, dialect) {
   const { plain, masked } = scan(rawStmt, dialect);
   const kind = getStatementKind(masked);
-  const findings = [];
   const whereInfo = findWhereClause(masked, plain);
+
+  const Ast = globalThis.SQLMeganeSqlAst;
+  const AstRules = globalThis.SQLMeganeAstRules;
+  const Summarizer = globalThis.SQLMeganeSummarizer;
+
+  const parse = { mode: 'regex-only', error: null, parserDialect: null, usedFallbackDialect: null };
+  let ast = null;
+
+  if (Ast && Ast.isAvailable(dialect)) {
+    const result = Ast.parseStatement(rawStmt, dialect);
+    if (result.ok) {
+      ast = result.ast;
+      parse.mode = 'ast';
+      parse.parserDialect = result.parserDialect;
+      parse.usedFallbackDialect = result.usedFallbackDialect;
+    } else {
+      parse.mode = 'fallback';
+      parse.error = result.error;
+    }
+  }
+
+  const summary = (ast && Summarizer) ? Summarizer.summarize(ast) : null;
+
+  // AST基盤ルールを使うのは UPDATE / DELETE のうち、ASTの文種別が正規表現側の
+  // 判定と一致するものだけ。食い違うときは安全側（従来ロジック）に倒す。
+  // それ以外の文種別（TRUNCATE / DROP / トランザクション制御など）はASTを使っても
+  // 判定内容が変わらないため、従来経路のまま要約だけを追加する。
+  const astRulesUsable = !!(ast && AstRules && AST_TYPE_TO_KIND[ast.type] === kind);
+
+  if (astRulesUsable) {
+    const findings = AstRules.analyzeAst(ast, kind, dialect);
+    let verifySelect = null;
+    if (kind === 'UPDATE' || kind === 'DELETE') {
+      verifySelect = buildVerifySelectFromAst(kind, ast, masked, plain, whereInfo)
+        || buildVerifySelect(kind, masked, whereInfo);
+    }
+    findings.sort((a, b) => SEVERITY_ORDER[a.severity] - SEVERITY_ORDER[b.severity]);
+    return { kind, findings, verifySelect, masked, plain, summary, parse, ast };
+  }
+
+  return analyzeStatementByRegex(rawStmt, dialect, { plain, masked, kind, whereInfo, summary, parse, ast });
+}
+
+/** 従来の正規表現ヒューリスティックによる解析（フォールバック経路） */
+function analyzeStatementByRegex(rawStmt, dialect, ctx) {
+  const { plain, masked, kind, whereInfo } = ctx;
+  const findings = [];
 
   if (kind === 'UPDATE' && !whereInfo) {
     const joinUpdate = updateHasJoin(masked);
@@ -822,7 +966,83 @@ function analyzeStatement(rawStmt, dialect) {
 
   findings.sort((a, b) => SEVERITY_ORDER[a.severity] - SEVERITY_ORDER[b.severity]);
 
-  return { kind, findings, verifySelect, masked, plain };
+  return {
+    kind,
+    findings,
+    verifySelect,
+    masked,
+    plain,
+    summary: ctx.summary || null,
+    parse: ctx.parse || { mode: 'regex-only', error: null, parserDialect: null, usedFallbackDialect: null },
+    ast: ctx.ast || null,
+  };
+}
+
+// ---------------------------------------------------------------------------
+// 触るテーブルの収集（スクリプトモードの全体サマリで使う）
+// ---------------------------------------------------------------------------
+
+function extractDdlTarget(kind, masked) {
+  if (kind !== 'TRUNCATE_TABLE' && kind !== 'DROP_TABLE') return null;
+  const m = masked.match(/^\s*(?:TRUNCATE\s+TABLE|DROP\s+TABLE)\s+(?:IF\s+EXISTS\s+)?/i);
+  if (!m) return null;
+  return matchLeadingIdentifier(masked.slice(m[0].length));
+}
+
+function collectTables(result) {
+  const names = [];
+  const push = (n) => {
+    if (!n) return;
+    const norm = normalizeIdent(n);
+    if (!norm) return;
+    if (!names.some((x) => normalizeIdent(x) === norm)) names.push(n);
+  };
+
+  const A = globalThis.SQLMeganeSqlAst;
+  if (result.ast && A) {
+    for (const t of A.rowSourceTables(result.ast)) push(t.table);
+    for (const t of A.writeTargets(result.ast)) push(t.table);
+    if (Array.isArray(result.ast.name)) for (const t of result.ast.name) push(t && t.table);
+    if (names.length > 0) return names;
+  }
+
+  push(extractOuterTable(result.kind, result.masked));
+  push(extractDdlTarget(result.kind, result.masked));
+  return names;
+}
+
+// スクリプトモード（全体サマリカードを出す）に切り替える文数のしきい値
+const SCRIPT_MODE_MIN_STATEMENTS = 5;
+
+function buildOverview(statements) {
+  if (statements.length < SCRIPT_MODE_MIN_STATEMENTS) return null;
+
+  const counts = {};
+  const tables = [];
+  const warnedStatements = [];
+  const fallbackStatements = [];
+
+  for (const s of statements) {
+    counts[s.kind] = (counts[s.kind] || 0) + 1;
+    for (const t of s.tables || []) {
+      if (!tables.some((x) => normalizeIdent(x) === normalizeIdent(t))) tables.push(t);
+    }
+    if (s.findings.some((f) => f.severity === 'danger' || f.severity === 'warning')) {
+      warnedStatements.push(s.number);
+    }
+    if (s.parse && s.parse.mode === 'fallback') fallbackStatements.push(s.number);
+  }
+
+  const destructive = statements.filter((s) => DESTRUCTIVE_KINDS.has(s.kind)).length;
+
+  return {
+    total: statements.length,
+    counts,
+    destructiveCount: destructive,
+    tables,
+    warnedStatements,
+    fallbackStatements,
+  };
 }
 
 // ---------------------------------------------------------------------------
@@ -831,7 +1051,8 @@ function analyzeStatement(rawStmt, dialect) {
 
 function analyzeSQL(fullText, dialect) {
   const d = dialect || 'generic';
-  const rawStatements = splitStatements(fullText || '', d);
+  const text = fullText || '';
+  const rawStatements = splitStatementsWithOffsets(text, d);
   const statements = [];
   let txOpen = false;
   let sawDmlInBatch = false;
@@ -839,7 +1060,8 @@ function analyzeSQL(fullText, dialect) {
   let firstBeginTranIdx = -1;
   let firstDestructiveIdx = -1;
 
-  rawStatements.forEach((raw, idx) => {
+  rawStatements.forEach((entry, idx) => {
+    const raw = entry.raw;
     const result = analyzeStatement(raw, d);
     const { kind, findings } = result;
 
@@ -884,12 +1106,22 @@ function analyzeSQL(fullText, dialect) {
 
     findings.sort((a, b) => SEVERITY_ORDER[a.severity] - SEVERITY_ORDER[b.severity]);
 
+    // 構文エラーの位置は「その文の中での行番号」で返ってくるので、
+    // 貼り付けたテキスト全体での行番号に変換してから表示する
+    const parse = result.parse;
+    if (parse && parse.error && parse.error.line != null) {
+      parse.error.globalLine = lineNumberAt(text, entry.start) + (parse.error.line - 1);
+    }
+
     statements.push({
       number: idx + 1,
       raw,
       kind,
       findings,
       verifySelect: result.verifySelect,
+      summary: result.summary,
+      parse,
+      tables: collectTables(result),
     });
   });
 
@@ -917,7 +1149,22 @@ function analyzeSQL(fullText, dialect) {
     }
   }
 
-  return { dialect: d, statements, globalFindings };
+  const Ast = globalThis.SQLMeganeSqlAst;
+  const astSupported = !!(Ast && Ast.isAvailable(d));
+
+  return {
+    dialect: d,
+    statements,
+    globalFindings,
+    overview: buildOverview(statements),
+    // UIが「構文解析あり / 簡易チェック」バッジを出すための情報
+    analysis: {
+      astSupported,
+      parserDialect: Ast ? Ast.parserDialectFor(d) : null,
+      astStatements: statements.filter((s) => s.parse && s.parse.mode === 'ast').length,
+      fallbackStatements: statements.filter((s) => s.parse && s.parse.mode === 'fallback').length,
+    },
+  };
 }
 
 // テスト等から直接呼べるように内部関数もエクスポートしておく
@@ -939,6 +1186,14 @@ const _internal = {
   isSingleEqualityWhere,
   isMysqlMultiTableUpdate,
   updateHasJoin,
+  splitStatementsWithOffsets,
+  lineNumberAt,
+  findTableExprRange,
+  buildVerifySelectFromAst,
+  collectTables,
+  buildOverview,
+  analyzeStatement,
+  SCRIPT_MODE_MIN_STATEMENTS,
 };
 
 // ---------------------------------------------------------------------------
@@ -959,7 +1214,9 @@ const _internal = {
 globalThis.SQLMeganeAnalyzer = {
   analyzeSQL,
   splitStatements,
+  splitStatementsWithOffsets,
   SEVERITY_ORDER,
+  SCRIPT_MODE_MIN_STATEMENTS,
   _internal,
 };
 

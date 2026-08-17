@@ -68,13 +68,22 @@
     <h2>これは何？</h2>
     <p>
       本番データベースに手作業でUPDATE/DELETEを実行する前に、SQLを貼り付けるだけで
-      「WHERE句の抜け」「常に真になる条件」「範囲が広がりやすいOR/LIKE」などの
-      定番の事故パターンを検出する試作ツールです。組織への導入やアカウント登録は不要で、
+      <strong>「このSQLが何をするか」を日本語で読み返せる</strong>ツールです。
+      操作対象・WHERE条件・JOINで残る行と落ちる行を日本語で書き下し、あわせて
+      「WHERE句の抜け」「常に真になる条件」「外部結合がWHEREで打ち消されている」などの
+      定番の事故パターンを検出します。組織への導入やアカウント登録は不要で、
       このページを開くだけで使えます。
     </p>
+    <p>
+      MySQL / PostgreSQL / SQL Server を選んだ場合は、ページに同梱したSQLパーサで
+      構文解析（AST）を行い、日本語要約とAST基盤の検出を表示します。
+      Oracle・汎用を選んだ場合、および構文解析に失敗した場合は、
+      従来の正規表現ベースの<strong>簡易チェック</strong>に切り替わります（画面上に明示されます）。
+    </p>
     <p class="disclaimer">
-      これは需要検証のための<strong>試作品（プロトタイプ）</strong>です。検出は正規表現ベースのヒューリスティックであり、
-      本格的なSQLパーサではありません。<strong>「危険が検出されない = 安全」ではありません。</strong>
+      これは需要検証のための<strong>試作品（プロトタイプ）</strong>です。
+      構文解析に成功した場合でも、意味論のすべてを検査できるわけではありません。
+      <strong>「危険が検出されない = 安全」ではありません。</strong>
       最終判断は必ず人間が行い、可能な限り検算SELECTやステージング環境での確認を併用してください。
     </p>
   </section>
@@ -101,6 +110,17 @@
   </div>
 </footer>
 
+<!--
+  同梱パーサ（node-sql-parser / Apache-2.0）。CDNからは読み込まず、
+  js/vendor/ に同梱したものを <script> で読み込む（file:// 直開きでも動くように）。
+  ライセンス全文: js/vendor/LICENSE-node-sql-parser
+-->
+<script src="js/vendor/node-sql-parser-mysql.js"></script>
+<script src="js/vendor/node-sql-parser-postgresql.js"></script>
+<script src="js/vendor/node-sql-parser-transactsql.js"></script>
+<script src="js/sql-ast.js"></script>
+<script src="js/summarizer.js"></script>
+<script src="js/ast-rules.js"></script>
 <script src="js/analyzer.js"></script>
 <script src="js/app.js"></script>
 </body>

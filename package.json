@@ -1,10 +1,11 @@
 {
   "name": "sqlmegane-prototype",
-  "version": "0.1.0",
+  "version": "0.2.0",
   "private": true,
-  "description": "SQLMegane（SQLめがね） - ブラウザ完結のSQL事故チェッカー 需要検証用プロトタイプ。ビルド不要・依存パッケージなし。node tests/run-tests.mjs でテスト実行。",
+  "description": "SQLMegane（SQLめがね） - 実行前のSQLを日本語で読み返す、ブラウザ完結のSQL事故チェッカー。ビルド不要・実行時の依存なし（SQLパーサは js/vendor/ に同梱）。node tests/run-tests.mjs でテスト実行。",
   "type": "module",
   "scripts": {
-    "test": "node tests/run-tests.mjs"
+    "test": "node tests/run-tests.mjs",
+    "build:vendor": "npm install --no-save node-sql-parser && node tools/build-vendor.mjs"
   }
 }
