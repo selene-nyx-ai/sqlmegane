@@ -888,54 +888,132 @@ function isSingleEqualityWhere(maskedClause) {
 }
 
 // ---------------------------------------------------------------------------
-// PL/SQL・T-SQL 無名ブロックの検出（P1: 分解事故対策）
+// PL/SQL ユニットの検出と埋め込みDMLの抽出（Oracle対応 Phase 1）
 // ---------------------------------------------------------------------------
 //
-// `BEGIN ... END; / ` のようなPL/SQLの無名ブロック（DECLARE や
-// CREATE OR REPLACE ... で始まるプロシージャ/ファンクション定義を含む）を
-// 通常のセミコロン分割にかけると、ブロック内の `UPDATE ... WHERE ...;` が
-// 独立した1文として切り出されるのではなく、ブロック全体が「BEGIN」で始まる
-// 1文として getStatementKind() に渡り、kind=BEGIN_TX（トランザクション開始）に
-// 誤判定されてしまう。その結果、ブロック内のUPDATEのWHERE漏れ等が一切
-// チェックされないまま無警告で素通りする（実際に発生が確認された事故）。
+// 経緯:
+//   `BEGIN ... END; / ` のようなPL/SQLブロックを通常のセミコロン分割にかけると、
+//   ブロック内の `UPDATE ... WHERE ...;` が独立した1文として切り出されるのでは
+//   なく、ブロック全体が「BEGIN」で始まる1文として getStatementKind() に渡り、
+//   kind=BEGIN_TX（トランザクション開始）に誤判定されてしまう。その結果、
+//   ブロック内のUPDATEのWHERE漏れ等が一切チェックされないまま無警告で素通り
+//   する事故が起きた。v2 ではこれを「ブロック全体を1文として扱い、中身は解析
+//   せず必ず警告を出す」ことで塞いだ。
 //
-// 対策として、入力テキストの先頭が BEGIN / DECLARE / CREATE OR REPLACE で
-// 始まり、かつ END; の後に「行頭が / だけの行」（SQL*Plus的なブロック終端）が
-// 続く場合は、その範囲をセミコロン分割の対象から外し、ブロック全体を1文として
-// 扱う（中身は解析せず、必ず警告を出す）。
+//   しかし現場のOracleスクリプトはそのほとんどがPL/SQLパッケージ／プロシージャの
+//   形をしており、「丸ごと解析対象外」では実質的に使えない、という指摘を受けた。
+//   そこで Phase 1 として「中のDMLは抽出して個別にチェックする」に格上げする。
 //
-// 検知ヒューリスティックは意図的に保守的にしてある。「/ 終端行」が無い限り
-// ブロックとは認識しないため、通常の `BEGIN TRAN ... COMMIT` のようなT-SQLの
-// 複数文スクリプトを誤ってブロック扱いにすることは無い（＝誤ってブロック扱いに
-// するより、分割してしまう既存挙動が残る方がまし、という判断）。
+// 実装:
+//   抽出そのものは js/plsql-extract.js（SQLMeganePlsqlExtract）が担当する。
+//   ここではその結果を既存の1文解析（analyzeStatement）に流し込み、
+//   PL/SQLユニット1件＝1つの文カード（中に抽出DMLのサブカード）として返す。
+//
+//   制御フロー（IF / LOOP / EXCEPTION / カーソル制御）は**解析しない**。
+//   解析していないことは必ず finding（info）として明示する。
+//
+// ユニット認識のヒューリスティックは意図的に保守的にしてある。`/` 終端行が
+// 無い限りユニットとは認識しないため、通常の `BEGIN TRAN ... COMMIT` のような
+// T-SQLの複数文スクリプトを誤ってユニット扱いにすることは無い。
 
-const PLSQL_BLOCK_START_RE = /^(BEGIN|DECLARE|CREATE\s+OR\s+REPLACE)\b/i;
-// 行頭（前後に空白のみ許容）が "/" だけの行。SQL*Plus / SQLcl のブロック終端。
-const PLSQL_SLASH_LINE_RE = /^[ \t]*\/[ \t]*\r?$/gm;
+const PLSQL_CONTROL_FLOW_NOTE_TITLE = 'PL/SQLの制御フローは解析していません';
+const PLSQL_CONTROL_FLOW_NOTE_MESSAGE =
+  'PL/SQLの制御フロー（ループ・分岐・例外処理）は解析していません。抽出したDML単位の簡易チェックです。'
+  + 'どのDMLが実際に何回実行されるか、例外時に何がロールバックされるかは判断していません。';
 
 /**
- * text の先頭からPL/SQL無名ブロックを検出し、その範囲 { start, end } を返す。
- * 見つからなければ null。
- *  - start: ブロック本体の開始オフセット（先頭の空白を除く）
- *  - end:   "/" 終端行の直後のオフセット（このオフセット以降が次の文の探索対象）
- *
- * "END ... ;" が "/" 終端行より前に存在することを条件にすることで、
- * ブロックに無関係な "/" （たとえばコメント中や別の文脈）に反応しないようにする。
+ * PL/SQLユニット1件を解析する。
+ * 中の埋め込みDMLを抽出し、それぞれを通常の1文解析にかけてサブ結果として返す。
  */
-function detectPlsqlBlockRange(text) {
-  const leadingWsLen = text.length - text.replace(/^\s+/, '').length;
-  const trimmedStart = text.slice(leadingWsLen);
-  if (!PLSQL_BLOCK_START_RE.test(trimmedStart)) return null;
+function analyzePlsqlUnit(unitText, dialect) {
+  const P = globalThis.SQLMeganePlsqlExtract;
+  const scanned = P ? P.maskPlsql(unitText) : scan(unitText, dialect);
+  const { plain, masked } = scanned;
 
-  PLSQL_SLASH_LINE_RE.lastIndex = 0;
-  let m;
-  while ((m = PLSQL_SLASH_LINE_RE.exec(text))) {
-    const before = text.slice(0, m.index);
-    if (/\bEND\s*;/i.test(before)) {
-      return { start: leadingWsLen, end: m.index + m[0].length };
-    }
+  if (!P) {
+    // 抽出モジュールが読み込まれていない場合は、従来どおり「丸ごと解析対象外」。
+    return {
+      kind: 'PLSQL_UNIT',
+      findings: [mk('warning', 'unanalyzed-statement', UNANALYZED_STATEMENT_TITLE,
+        `${UNANALYZED_STATEMENT_MESSAGE} PL/SQLブロックの中身は解析していません。`)],
+      verifySelect: null,
+      verifySelectHasJoin: false,
+      masked, plain, summary: null, ast: null,
+      parse: { mode: 'plsql-unit', error: null, parserDialect: null, usedFallbackDialect: null, primaryError: null },
+      plsql: null,
+    };
   }
-  return null;
+
+  const info = P.extractPlsqlUnit(unitText);
+
+  const items = info.items.map((item) => {
+    const r = analyzeStatement(item.sql, dialect, {});
+    const verifySelect = r.verifySelect;
+    return {
+      label: item.label,
+      kind: item.kind,
+      cursorName: item.cursorName || null,
+      sql: item.sql,
+      offset: item.offset,
+      analyzedKind: r.kind,
+      findings: r.findings,
+      verifySelect,
+      verifySelectHasJoin: !!r.verifySelectHasJoin,
+      // 検算SELECTのWHERE句にPL/SQL変数・バインド変数が残っている場合は、
+      // そのままでは実行できないことを利用者に明示する必要がある。
+      verifySelectHasRuntimeVariable: P.hasRuntimeVariable(verifySelect),
+      summary: r.summary,
+      parse: r.parse,
+      tables: collectTables(r),
+    };
+  });
+
+  const findings = [];
+  if (items.length === 0 && info.hasExecutableBody) {
+    // 実行可能な本体があるのにDMLを1本も切り出せなかった場合だけ、従来どおりの
+    // 「解析できませんでした」警告に倒す（沈黙素通りを防ぐのが目的）。
+    findings.push(mk('warning', 'unanalyzed-statement', UNANALYZED_STATEMENT_TITLE,
+      `${UNANALYZED_STATEMENT_MESSAGE} PL/SQLブロックからDMLを1本も抽出できませんでした（動的SQLなどの可能性があります）。中身を目視で確認してください。`));
+  } else if (items.length === 0) {
+    findings.push(mk('info', 'plsql-declaration-only',
+      'DMLを含まない宣言部です',
+      'このPL/SQLユニットは宣言（プロシージャ／ファンクションの仕様、型定義など）だけで構成されており、実行されるDMLは含まれていません。'));
+  }
+  findings.push(mk('info', 'plsql-control-flow',
+    PLSQL_CONTROL_FLOW_NOTE_TITLE, PLSQL_CONTROL_FLOW_NOTE_MESSAGE));
+
+  return {
+    kind: 'PLSQL_UNIT',
+    findings,
+    verifySelect: null,
+    verifySelectHasJoin: false,
+    masked,
+    plain,
+    summary: null,
+    ast: null,
+    parse: { mode: 'plsql-unit', error: null, parserDialect: null, usedFallbackDialect: null, primaryError: null },
+    plsql: {
+      header: info.header,
+      unitKind: info.unitKind,
+      unitName: info.unitName,
+      structure: P.buildStructureSummary(info),
+      procedureCount: info.procedureCount,
+      functionCount: info.functionCount,
+      cursorCount: info.cursorCount,
+      hasCommit: info.hasCommit,
+      hasRollback: info.hasRollback,
+      hasExecutableBody: info.hasExecutableBody,
+      items,
+    },
+  };
+}
+
+/** PL/SQLユニットの中で検出された finding をすべて平らに集める（集計・表示用） */
+function collectPlsqlFindings(stmt) {
+  const out = [];
+  if (!stmt.plsql) return out;
+  for (const item of stmt.plsql.items) out.push(...item.findings);
+  return out;
 }
 
 // ---------------------------------------------------------------------------
@@ -959,25 +1037,10 @@ const AST_TYPE_TO_KIND = { update: 'UPDATE', delete: 'DELETE' };
 function analyzeStatement(rawStmt, dialect, opts) {
   const { plain, masked } = scan(rawStmt, dialect);
 
-  if (opts && opts.isPlsqlBlock) {
-    // PL/SQL/T-SQLの無名ブロック全体。中身は分解・解析せず、必ず警告を出す
-    // （P1: 分解事故対策。詳細は detectPlsqlBlockRange のコメント参照）。
-    return {
-      kind: 'PLSQL_BLOCK',
-      findings: [mk(
-        'warning',
-        'unanalyzed-statement',
-        '⚠ PL/SQL無名ブロックは解析対象外です',
-        'BEGIN 〜 END; の無名ブロック（PL/SQL、または類似のT-SQLブロック）と判定しました。中のDML（UPDATE/DELETE等）は個別のセミコロン分割や危険パターンチェックを行っていません。ブロック内の1文ずつを目視で確認してください。'
-      )],
-      verifySelect: null,
-      verifySelectHasJoin: false,
-      masked,
-      plain,
-      summary: null,
-      parse: { mode: 'plsql-block', error: null, parserDialect: null, usedFallbackDialect: null, primaryError: null },
-      ast: null,
-    };
+  if (opts && opts.isPlsqlUnit) {
+    // PL/SQLユニット（パッケージ／プロシージャ／無名ブロック等）。
+    // 中の埋め込みDMLを抽出して個別に解析する（詳細は analyzePlsqlUnit 参照）。
+    return analyzePlsqlUnit(rawStmt, dialect);
   }
 
   const kind = getStatementKind(masked);
@@ -1237,6 +1300,16 @@ function collectTables(result) {
     if (!names.some((x) => normalizeIdent(x) === norm)) names.push(n);
   };
 
+  // PL/SQLユニットは、抽出した各DMLが触るテーブルをまとめて持ち上げる。
+  // そうしないとスクリプト全体サマリの「触るテーブル」からPL/SQL内部の
+  // テーブルだけが抜け落ちてしまう。
+  if (result.plsql) {
+    for (const item of result.plsql.items) {
+      for (const t of item.tables || []) push(t);
+    }
+    return names;
+  }
+
   const A = globalThis.SQLMeganeSqlAst;
   if (result.ast && A) {
     for (const t of A.rowSourceTables(result.ast)) push(t.table);
@@ -1267,7 +1340,10 @@ function buildOverview(statements) {
     for (const t of s.tables || []) {
       if (!tables.some((x) => normalizeIdent(x) === normalizeIdent(t))) tables.push(t);
     }
-    if (s.findings.some((f) => f.severity === 'danger' || f.severity === 'warning')) {
+    // PL/SQLユニットは、自分自身のfindingsではなく中の抽出DMLに危険が出る。
+    // 全体サマリの「警告のある文」から漏れないよう、サブDMLのfindingsも見る。
+    const allFindings = s.findings.concat(collectPlsqlFindings(s));
+    if (allFindings.some((f) => f.severity === 'danger' || f.severity === 'warning')) {
       warnedStatements.push(s.number);
     }
     if (s.parse && s.parse.mode === 'fallback') fallbackStatements.push(s.number);
@@ -1297,23 +1373,36 @@ function buildOverview(statements) {
 // ---------------------------------------------------------------------------
 
 /**
- * splitStatementsWithOffsets() の前段として、先頭がPL/SQL無名ブロックかどうかを
- * 判定する。ブロックが見つかった場合は、ブロック本体を1文として先頭に置き、
- * 残りのテキストだけを通常通りセミコロン分割する（ブロックの中身は分割しない）。
+ * splitStatementsWithOffsets() の前段として、入力テキストを `/` だけの行
+ * （SQL*Plus のブロック終端）でチャンクに分け、チャンクごとに
+ *  - PL/SQLユニット（パッケージ／プロシージャ／無名ブロック等）ならそのまま1文
+ *  - そうでなければ従来どおりセミコロン分割
+ * とする。
+ *
+ * パッケージ仕様部と本体が `/` で区切られて並んでいる、という実務で最も普通の
+ * 形を扱えるようにするため、チャンクは複数回現れてよい（v2 は先頭の1ブロック
+ * しか見ていなかった）。
+ *
  * オフセットはすべて元テキスト基準に補正するので、行番号表示は従来通り機能する。
  */
 function buildRawStatements(text, dialect) {
-  const blockRange = detectPlsqlBlockRange(text);
-  if (!blockRange) return splitStatementsWithOffsets(text, dialect).map((s) => ({ ...s, isPlsqlBlock: false }));
+  const P = globalThis.SQLMeganePlsqlExtract;
+  if (!P) {
+    return splitStatementsWithOffsets(text, dialect).map((s) => ({ ...s, isPlsqlUnit: false }));
+  }
 
-  const blockRaw = text.slice(blockRange.start, blockRange.end).trim();
-  const rest = text.slice(blockRange.end);
-  const restStatements = splitStatementsWithOffsets(rest, dialect).map((s) => ({
-    raw: s.raw,
-    start: s.start + blockRange.end,
-    isPlsqlBlock: false,
-  }));
-  return [{ raw: blockRaw, start: blockRange.start, isPlsqlBlock: true }, ...restStatements];
+  const out = [];
+  for (const chunk of P.splitSlashChunks(text)) {
+    if (P.isPlsqlUnitChunk(chunk.text, chunk.terminatedBySlash)) {
+      const lead = chunk.text.length - chunk.text.replace(/^\s+/, '').length;
+      out.push({ raw: chunk.text.trim(), start: chunk.start + lead, isPlsqlUnit: true });
+      continue;
+    }
+    for (const s of splitStatementsWithOffsets(chunk.text, dialect)) {
+      out.push({ raw: s.raw, start: s.start + chunk.start, isPlsqlUnit: false });
+    }
+  }
+  return out;
 }
 
 function analyzeSQL(fullText, dialect) {
@@ -1331,7 +1420,7 @@ function analyzeSQL(fullText, dialect) {
 
   rawStatements.forEach((entry, idx) => {
     const raw = entry.raw;
-    const result = analyzeStatement(raw, d, { isPlsqlBlock: entry.isPlsqlBlock });
+    const result = analyzeStatement(raw, d, { isPlsqlUnit: entry.isPlsqlUnit });
     const { kind, findings } = result;
 
     if (kind === 'BEGIN_TX') {
@@ -1410,6 +1499,7 @@ function analyzeSQL(fullText, dialect) {
       verifySelectHasJoin: !!result.verifySelectHasJoin,
       summary: result.summary,
       parse,
+      plsql: result.plsql || null,
       tables: collectTables(result),
     });
   });
@@ -1492,6 +1582,8 @@ const _internal = {
   collectTables,
   buildOverview,
   analyzeStatement,
+  analyzePlsqlUnit,
+  buildRawStatements,
   SCRIPT_MODE_MIN_STATEMENTS,
 };
 
@@ -1514,6 +1606,7 @@ globalThis.SQLMeganeAnalyzer = {
   analyzeSQL,
   splitStatements,
   splitStatementsWithOffsets,
+  collectPlsqlFindings,
   SEVERITY_ORDER,
   SCRIPT_MODE_MIN_STATEMENTS,
   _internal,

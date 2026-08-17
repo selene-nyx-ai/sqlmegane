@@ -409,6 +409,72 @@ body {
   padding: 14px 16px;
 }
 
+/* ------------------------------------------------------------------ */
+/* PL/SQLユニット（Oracle対応 Phase 1）                                */
+/* ------------------------------------------------------------------ */
+
+/* 構造サマリ: 「PACKAGE BODY pkg_x / プロシージャ2個 / 抽出したDML: ...」 */
+.plsql-structure {
+  padding: 12px 16px;
+  background: var(--info-bg);
+  border-bottom: 1px solid var(--panel-border-soft);
+}
+
+.plsql-structure-head {
+  margin: 0 0 4px;
+  font-weight: 700;
+  font-size: 0.9rem;
+  color: var(--text);
+  word-break: break-word;
+}
+
+.plsql-structure-line {
+  margin: 0;
+  font-size: 0.83rem;
+  line-height: 1.7;
+  color: var(--text-muted);
+  word-break: break-word;
+}
+
+/* 抽出したDMLのサブカード群 */
+.plsql-items {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+  padding: 14px 16px;
+}
+
+.plsql-items-title {
+  margin: 0;
+  font-size: 0.82rem;
+  font-weight: 700;
+  color: var(--text-muted);
+}
+
+.plsql-item {
+  border: 1px solid var(--panel-border);
+  border-radius: 8px;
+  overflow: hidden;
+  background: var(--panel);
+}
+
+.plsql-item-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+  flex-wrap: wrap;
+  padding: 10px 14px;
+  background: var(--bg-elevated);
+  border-bottom: 1px solid var(--panel-border-soft);
+  font-size: 0.85rem;
+  color: var(--text-muted);
+}
+
+.plsql-item .stmt-sql {
+  max-height: 160px;
+}
+
 .finding {
   border-radius: 8px;
   border: 1px solid;

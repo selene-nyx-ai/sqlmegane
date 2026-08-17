@@ -8,7 +8,7 @@
 // 順に読み込むことで、この時点で SQLMeganeAnalyzer が必ず定義済みであることを
 // 保証している。
 
-const { analyzeSQL } = globalThis.SQLMeganeAnalyzer;
+const { analyzeSQL, collectPlsqlFindings } = globalThis.SQLMeganeAnalyzer;
 
 const els = {
   input: document.getElementById('sql-input'),
@@ -32,7 +32,7 @@ const KIND_LABELS = {
   ALTER: 'ALTER',
   BEGIN_TX: 'BEGIN / トランザクション開始',
   END_TX: 'COMMIT / ROLLBACK',
-  PLSQL_BLOCK: 'PL/SQL無名ブロック（未解析）',
+  PLSQL_UNIT: 'PL/SQLユニット',
   OTHER: 'その他',
 };
 
@@ -133,7 +133,7 @@ async function copyToClipboard(text, btn) {
  * 1対多のJOINでは実際の更新・削除対象の行数より大きくなりうることを、ラベルと
  * 注記の両方で明示する（生成SQL自体にも同内容のコメントが入っている）。
  */
-function renderVerifySelect(sql, hasJoin) {
+function renderVerifySelect(sql, hasJoin, hasRuntimeVariable) {
   const wrap = el('div', { className: 'verify-select' });
   const head = el('div', { className: 'verify-select-head' });
   const labelText = hasJoin
@@ -148,6 +148,14 @@ function renderVerifySelect(sql, hasJoin) {
     wrap.appendChild(el('p', {
       className: 'verify-select-note',
       text: '※JOINを含むため結合行数です。1対多の結合では実際の更新行数より大きくなることがあります。',
+    }));
+  }
+  // PL/SQL内部から抽出したDMLは、WHERE句にPL/SQL変数やバインド変数が残る。
+  // そのままでは実行できないので、置き換えが必要なことを明示する。
+  if (hasRuntimeVariable) {
+    wrap.appendChild(el('p', {
+      className: 'verify-select-note',
+      text: '※WHERE句にPL/SQLの変数・バインド変数が含まれています。:変数 部分は実行時の値に置き換えてください。',
     }));
   }
   const pre = el('pre');
@@ -263,17 +271,80 @@ function isUnanalyzedStatement(stmt) {
   return stmt.findings.some((f) => f.code === 'unanalyzed-statement');
 }
 
+// ---------------------------------------------------------------------------
+// PL/SQLユニット（Oracle対応 Phase 1）
+// ---------------------------------------------------------------------------
+
+/** 抽出したDML1本ぶんのサブカード。通常の文カードと同じ内容（findings・検算SELECT）を出す */
+function renderPlsqlItem(item, index) {
+  const card = el('div', { className: 'plsql-item' });
+
+  const headRow = el('div', { className: 'plsql-item-head' });
+  const title = el('div', { className: 'stmt-title' });
+  title.appendChild(el('span', { className: 'stmt-number', text: `抽出 ${index + 1}` }));
+  const labelText = item.cursorName ? `${item.label}: ${item.cursorName}` : item.label;
+  title.appendChild(el('span', { className: 'stmt-kind', text: labelText }));
+  headRow.appendChild(title);
+  renderSeverityChips(headRow, countBySeverity(item.findings));
+  card.appendChild(headRow);
+
+  const sqlPre = el('pre', { className: 'stmt-sql' });
+  sqlPre.textContent = item.sql;
+  card.appendChild(sqlPre);
+
+  if (item.findings.length > 0) {
+    const list = el('div', { className: 'findings-list' });
+    for (const f of item.findings) list.appendChild(renderFinding(f));
+    card.appendChild(list);
+  } else {
+    const note = el('div', { className: 'no-findings-note' });
+    note.appendChild(document.createTextNode('明らかな危険は検出されませんでした'));
+    const small = el('small', { text: '（検出できない危険もあります。最終判断は必ず人間が行ってください）' });
+    note.appendChild(small);
+    card.appendChild(note);
+  }
+
+  if (item.verifySelect) {
+    card.appendChild(renderVerifySelect(
+      item.verifySelect,
+      !!item.verifySelectHasJoin,
+      !!item.verifySelectHasRuntimeVariable
+    ));
+  }
+
+  return card;
+}
+
+/** PL/SQLユニットの構造サマリ（何が何個あって、DMLを何本抽出したか） */
+function renderPlsqlStructure(plsql) {
+  const wrap = el('div', { className: 'plsql-structure' });
+  wrap.appendChild(el('p', { className: 'plsql-structure-head', text: `PL/SQLユニット: ${plsql.header}` }));
+  wrap.appendChild(el('p', { className: 'plsql-structure-line', text: plsql.structure }));
+  return wrap;
+}
+
 function renderStatementCard(stmt, dialect) {
   const cardClass = isUnanalyzedStatement(stmt) ? 'stmt-card stmt-card-unanalyzed' : 'stmt-card';
   const card = el('div', { className: cardClass, attrs: { id: `stmt-${stmt.number}` } });
+
+  // PL/SQLユニットは、自分自身のfindings（制御フロー未解析の注記など）だけでなく
+  // 抽出したDMLのfindingsも数に入れないと、カード見出しが「危険の検出なし」に
+  // 見えてしまう（中のUPDATEがWHERE漏れでも気づけない）。
+  const headlineFindings = stmt.plsql
+    ? stmt.findings.concat(collectPlsqlFindings(stmt))
+    : stmt.findings;
 
   const headRow = el('div', { className: 'stmt-card-head' });
   const title = el('div', { className: 'stmt-title' });
   title.appendChild(el('span', { className: 'stmt-number', text: `文 ${stmt.number}` }));
   title.appendChild(el('span', { className: 'stmt-kind', text: KIND_LABELS[stmt.kind] || stmt.kind }));
   headRow.appendChild(title);
-  renderSeverityChips(headRow, countBySeverity(stmt.findings));
+  renderSeverityChips(headRow, countBySeverity(headlineFindings));
   card.appendChild(headRow);
+
+  if (stmt.plsql) {
+    card.appendChild(renderPlsqlStructure(stmt.plsql));
+  }
 
   const sqlPre = el('pre', { className: 'stmt-sql' });
   sqlPre.textContent = stmt.raw;
@@ -293,7 +364,7 @@ function renderStatementCard(stmt, dialect) {
     const list = el('div', { className: 'findings-list' });
     for (const f of stmt.findings) list.appendChild(renderFinding(f));
     card.appendChild(list);
-  } else {
+  } else if (!stmt.plsql) {
     const note = el('div', { className: 'no-findings-note' });
     note.appendChild(document.createTextNode('明らかな危険は検出されませんでした'));
     const small = el('small', { text: '（検出できない危険もあります。最終判断は必ず人間が行ってください）' });
@@ -301,8 +372,18 @@ function renderStatementCard(stmt, dialect) {
     card.appendChild(note);
   }
 
+  if (stmt.plsql && stmt.plsql.items.length > 0) {
+    const list = el('div', { className: 'plsql-items' });
+    list.appendChild(el('p', {
+      className: 'plsql-items-title',
+      text: `抽出したDML（${stmt.plsql.items.length}件）— 1本ずつ通常の文と同じチェックをかけています`,
+    }));
+    stmt.plsql.items.forEach((item, i) => list.appendChild(renderPlsqlItem(item, i)));
+    card.appendChild(list);
+  }
+
   if (stmt.verifySelect) {
-    card.appendChild(renderVerifySelect(stmt.verifySelect, !!stmt.verifySelectHasJoin));
+    card.appendChild(renderVerifySelect(stmt.verifySelect, !!stmt.verifySelectHasJoin, false));
   }
 
   return card;
@@ -399,7 +480,7 @@ function renderOverview(overview) {
       const a = el('a', { className: 'overview-link', text: `#${num}`, attrs: { href: `#stmt-${num}` } });
       line.appendChild(a);
     });
-    line.appendChild(document.createTextNode('）。MERGE等の未対応構文・PL/SQLブロックなどは、チェックが行われていません。目視で確認してください。'));
+    line.appendChild(document.createTextNode('）。MERGE等の未対応構文や、DMLを1本も抽出できなかったPL/SQLブロックなどは、チェックが行われていません。目視で確認してください。'));
     card.appendChild(line);
   }
 

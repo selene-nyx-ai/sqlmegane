@@ -20,9 +20,11 @@ import '../js/vendor/node-sql-parser-transactsql.js';
 import '../js/sql-ast.js';
 import '../js/summarizer.js';
 import '../js/ast-rules.js';
+import '../js/plsql-extract.js';
 import '../js/analyzer.js';
 
 const { analyzeSQL, splitStatements, _internal } = globalThis.SQLMeganeAnalyzer;
+const PlsqlExtract = globalThis.SQLMeganePlsqlExtract;
 const { summarize, summaryToLines } = globalThis.SQLMeganeSummarizer;
 
 /** 要約を1本のテキストにして部分一致で検証しやすくする */
@@ -1503,37 +1505,48 @@ test('P1-2: インラインビューUPDATEで内外どちらにもWHEREが無け
 
 // ---------------------------------------------------------------------------
 // P1-3: PL/SQL/T-SQL無名ブロックの分解事故修正
+//
+// Oracle対応 Phase 1 で kind は PLSQL_BLOCK → PLSQL_UNIT に変わり、
+// 「丸ごと解析対象外」から「中のDMLを抽出して個別チェック」に格上げされた。
+// ここでは分解事故（中身がセミコロン分割されて誤判定される）が再発していない
+// ことと、抽出したDMLに従来の危険検出が効いていることの両方を確認する。
 // ---------------------------------------------------------------------------
 
 test('P1-3: BEGIN〜END;/ の無名ブロックはセミコロン分割されず1文として扱われる', () => {
   const sql = 'BEGIN\n  UPDATE emp SET sal = sal * 1.1;\n  COMMIT;\nEND;\n/';
   const result = analyzeSQL(sql, 'oracle');
   assert.equal(result.statements.length, 1, 'ブロックが複数文に分割されてしまっています');
-  assert.equal(result.statements[0].kind, 'PLSQL_BLOCK');
+  assert.equal(result.statements[0].kind, 'PLSQL_UNIT');
 });
 
-test('P1-3: PL/SQLブロック内のWHERE漏れUPDATEが、ブロックとして無警告で素通りしない（分解事故の再現ケース）', () => {
+test('P1-3: PL/SQLブロック内のWHERE漏れUPDATEが無警告で素通りしない（抽出して危険検出する）', () => {
   const sql = 'BEGIN\n  UPDATE emp SET sal = sal * 1.1;\n  COMMIT;\nEND;\n/';
   const s = firstStatement(sql, 'oracle');
-  // 修正前は kind=BEGIN_TX に誤判定され、中のUPDATEのWHERE漏れは一切チェックされず
-  // findingsが空のまま静かに通っていた。修正後は「解析対象外」の警告が必ず付く。
-  assert.ok(s.findings.length > 0);
-  assert.ok(hasCode(s.findings, 'unanalyzed-statement'));
-  assert.match(findCode(s.findings, 'unanalyzed-statement').message, /PL\/SQL|無名ブロック/);
+  // v2 では kind=BEGIN_TX に誤判定され、中のUPDATEのWHERE漏れは一切チェックされず
+  // findingsが空のまま静かに通っていた。Phase 1 では中のUPDATEを抽出して
+  // no-where-update を出す（＝「解析対象外」で逃げない）。
+  assert.ok(s.plsql, 'PL/SQLユニットとして解析されていません');
+  assert.equal(s.plsql.items.length, 1);
+  assert.ok(hasCode(s.plsql.items[0].findings, 'no-where-update'));
+  assert.equal(findCode(s.plsql.items[0].findings, 'no-where-update').severity, 'danger');
 });
 
-test('P1-3: DECLARE で始まるPL/SQLブロックも同様に1文として扱われる', () => {
+test('P1-3: DECLARE で始まるPL/SQLブロックも同様に1文として扱われ、中のDELETEが抽出される', () => {
   const sql = 'DECLARE\n  v_count NUMBER;\nBEGIN\n  DELETE FROM emp;\nEND;\n/';
   const result = analyzeSQL(sql, 'oracle');
   assert.equal(result.statements.length, 1);
-  assert.equal(result.statements[0].kind, 'PLSQL_BLOCK');
+  assert.equal(result.statements[0].kind, 'PLSQL_UNIT');
+  const items = result.statements[0].plsql.items;
+  assert.equal(items.length, 1);
+  assert.equal(items[0].kind, 'DELETE');
+  assert.ok(hasCode(items[0].findings, 'no-where-delete'));
 });
 
 test('P1-3: 通常のBEGIN TRAN 〜 COMMIT（T-SQLの複数文スクリプト）はブロック扱いにせず、従来通り分割される（誤検知しない）', () => {
   const sql = 'BEGIN TRAN\nUPDATE a SET x = 1 WHERE id = 1;\nCOMMIT\n';
   const result = analyzeSQL(sql, 'mssql');
   assert.ok(result.statements.length >= 2, 'BEGIN TRANスクリプトを誤ってPL/SQLブロック扱いにしています');
-  assert.ok(result.statements.every((s) => s.kind !== 'PLSQL_BLOCK'));
+  assert.ok(result.statements.every((s) => s.kind !== 'PLSQL_UNIT'));
 });
 
 // ---------------------------------------------------------------------------
@@ -1620,6 +1633,321 @@ test('overview.unanalyzedStatementsにMERGE文・PL/SQLブロックの番号が�
   const result = analyzeSQL(sql, 'oracle');
   assert.ok(result.overview, 'overviewがありません');
   assert.deepEqual(result.overview.unanalyzedStatements, [3]);
+});
+
+// ---------------------------------------------------------------------------
+// Oracle対応 Phase 1: PL/SQL構造認識と埋め込みDML抽出
+// ---------------------------------------------------------------------------
+
+// 受け入れ用サンプル。実務でよくある形のPL/SQLパッケージ（tests/fixtures/plsql-package.sql）と、
+// 抽出境界を突くための合成サンプル（q'記法・文字列内セミコロン等）。
+const REAL_SAMPLE = readProjectFile('tests/fixtures/plsql-package.sql');
+const EDGE_SAMPLE = readProjectFile('tests/fixtures/plsql-package-edgecases.sql');
+
+function plsqlUnit(sql, dialect) {
+  const result = analyzeSQL(sql, dialect || 'oracle');
+  return result.statements.find((s) => s.kind === 'PLSQL_UNIT');
+}
+
+function itemKinds(unit) {
+  return unit.plsql.items.map((i) => i.kind);
+}
+
+// --- 構造認識 -------------------------------------------------------------
+
+test('Phase1: CREATE OR REPLACE PACKAGE BODY がPL/SQLユニットとして認識される', () => {
+  const sql = 'CREATE OR REPLACE PACKAGE BODY pkg_x AS\n'
+    + '  PROCEDURE p1 IS\n  BEGIN\n    UPDATE t SET a = 1 WHERE id = 1;\n  END p1;\n'
+    + 'END pkg_x;\n/';
+  const u = plsqlUnit(sql);
+  assert.ok(u, 'PL/SQLユニットとして認識されていません');
+  assert.equal(u.plsql.unitKind, 'PACKAGE BODY');
+  assert.equal(u.plsql.unitName, 'pkg_x');
+  assert.equal(u.plsql.header, 'PACKAGE BODY pkg_x');
+});
+
+test('Phase1: 仕様部と本体が `/` 区切りで並んでいると、2つのPL/SQLユニットに分かれる', () => {
+  const sql = 'CREATE OR REPLACE PACKAGE pkg_x AS\n  PROCEDURE p1;\nEND pkg_x;\n/\n'
+    + 'CREATE OR REPLACE PACKAGE BODY pkg_x AS\n  PROCEDURE p1 IS\n  BEGIN\n'
+    + '    DELETE FROM t WHERE id = 1;\n  END p1;\nEND pkg_x;\n/\n';
+  const result = analyzeSQL(sql, 'oracle');
+  assert.equal(result.statements.length, 2, 'v2は先頭の1ブロックしか見ていなかった（複数ユニット対応の回帰）');
+  assert.ok(result.statements.every((s) => s.kind === 'PLSQL_UNIT'));
+  assert.equal(result.statements[0].plsql.unitKind, 'PACKAGE');
+  assert.equal(result.statements[1].plsql.unitKind, 'PACKAGE BODY');
+});
+
+test('Phase1: ユニット先頭にコメント行があってもPL/SQLユニットとして認識される', () => {
+  const sql = '-- 1. パッケージ仕様部\nCREATE OR REPLACE PACKAGE pkg_x AS\n  PROCEDURE p1;\nEND pkg_x;\n/';
+  const u = plsqlUnit(sql);
+  assert.ok(u);
+  assert.equal(u.plsql.unitKind, 'PACKAGE');
+});
+
+test('Phase1: 構造サマリにプロシージャ数・DML本数・カーソル数・COMMIT/ROLLBACKが出る', () => {
+  const sql = 'CREATE OR REPLACE PACKAGE BODY pkg_x AS\n'
+    + '  CURSOR c1 IS SELECT id FROM t WHERE a = 1;\n'
+    + '  PROCEDURE p1 IS\n  BEGIN\n    INSERT INTO logs (m) VALUES (1);\n    COMMIT;\n  END p1;\n'
+    + '  PROCEDURE p2 IS\n  BEGIN\n    UPDATE t SET a = 2 WHERE id = 1;\n  EXCEPTION WHEN OTHERS THEN ROLLBACK;\n  END p2;\n'
+    + 'END pkg_x;\n/';
+  const u = plsqlUnit(sql);
+  assert.equal(u.plsql.procedureCount, 2);
+  assert.equal(u.plsql.cursorCount, 1);
+  assert.ok(u.plsql.hasCommit);
+  assert.ok(u.plsql.hasRollback);
+  assert.match(u.plsql.structure, /プロシージャ2個/);
+  assert.match(u.plsql.structure, /UPDATE 1本/);
+  assert.match(u.plsql.structure, /INSERT 1本/);
+  assert.match(u.plsql.structure, /カーソル1個/);
+  assert.match(u.plsql.structure, /COMMITあり・ROLLBACKあり/);
+});
+
+test('Phase1: 制御フローを解析していないことを必ず info で明示する（danger縁取りにはしない）', () => {
+  const sql = 'BEGIN\n  UPDATE t SET a = 1 WHERE id = 1;\nEND;\n/';
+  const u = plsqlUnit(sql);
+  const f = findCode(u.findings, 'plsql-control-flow');
+  assert.ok(f, '制御フロー未解析の注記がありません');
+  assert.equal(f.severity, 'info');
+  assert.match(f.message, /制御フロー/);
+  assert.ok(!hasCode(u.findings, 'unanalyzed-statement'), 'DMLを抽出できたユニットは未解析扱いにしない');
+});
+
+// --- 抽出境界 -------------------------------------------------------------
+
+test('Phase1: 文字列リテラル内のセミコロンでDMLが切れない', () => {
+  const sql = "BEGIN\n  UPDATE t SET note = 'a;b;c' WHERE id = 1;\nEND;\n/";
+  const u = plsqlUnit(sql);
+  assert.equal(u.plsql.items.length, 1);
+  assert.match(u.plsql.items[0].sql, /WHERE id = 1$/);
+  assert.equal(u.plsql.items[0].findings.length, 0, 'WHERE句があるので危険は出ないはず');
+});
+
+test('Phase1: コメント内の BEGIN / END; / DML は構造にもDML抽出にも影響しない', () => {
+  const sql = 'BEGIN\n'
+    + '  -- ここに DELETE FROM t; と書いてあるがコメント\n'
+    + '  /* BEGIN\n     UPDATE t SET a = 1;\n     END; */\n'
+    + '  UPDATE t SET a = 1 WHERE id = 1;\nEND;\n/';
+  const u = plsqlUnit(sql);
+  assert.deepEqual(itemKinds(u), ['UPDATE']);
+});
+
+test('Phase1: ネストしたBEGIN/ENDブロックの中のDMLも抽出される', () => {
+  const sql = 'BEGIN\n  LOOP\n    BEGIN\n      UPDATE t SET a = 1 WHERE id = 1;\n'
+    + '    EXCEPTION WHEN OTHERS THEN\n      INSERT INTO err (m) VALUES (1);\n    END;\n'
+    + '  END LOOP;\nEND;\n/';
+  const u = plsqlUnit(sql);
+  assert.deepEqual(itemKinds(u), ['UPDATE', 'INSERT']);
+});
+
+test('Phase1: q\'記法の中のセミコロン・クォートで構造解析が壊れない', () => {
+  const sql = 'DECLARE\n'
+    + "  v VARCHAR2(100) := q'[status='X'; DELETE FROM t]';\n"
+    + 'BEGIN\n  UPDATE t SET a = 1 WHERE id = 1;\nEND;\n/';
+  const u = plsqlUnit(sql);
+  assert.deepEqual(itemKinds(u), ['UPDATE'], "q'記法の中のDELETEを拾ってしまっています");
+});
+
+test('Phase1: SELECT ... FOR UPDATE の UPDATE を別の文として切り出さない', () => {
+  const sql = 'BEGIN\n  SELECT a INTO v FROM t WHERE id = 1 FOR UPDATE;\nEND;\n/';
+  const u = plsqlUnit(sql);
+  assert.equal(u.plsql.items.length, 1);
+  assert.equal(u.plsql.items[0].label, 'SELECT INTO');
+});
+
+test('Phase1: FORALL + SAVE EXCEPTIONS のUPDATEが抽出される（キーワードとDMLの間に語が挟まる形）', () => {
+  const sql = 'BEGIN\n'
+    + '  FORALL i IN 1..v_orders.COUNT SAVE EXCEPTIONS\n'
+    + '    UPDATE orders SET status = 1 WHERE order_id = v_orders(i).order_id;\n'
+    + 'END;\n/';
+  const u = plsqlUnit(sql);
+  assert.deepEqual(itemKinds(u), ['UPDATE']);
+});
+
+test('Phase1: CURSOR宣言のSELECTは「カーソル定義」として抽出される', () => {
+  const sql = 'DECLARE\n  CURSOR c_pending IS SELECT id FROM orders WHERE status = 1;\n'
+    + 'BEGIN\n  NULL;\nEND;\n/';
+  const u = plsqlUnit(sql);
+  assert.equal(u.plsql.items.length, 1);
+  assert.equal(u.plsql.items[0].kind, 'CURSOR');
+  assert.equal(u.plsql.items[0].cursorName, 'c_pending');
+  assert.match(u.plsql.items[0].sql, /^SELECT id FROM orders/);
+});
+
+// --- バインド変数・条件判定 ------------------------------------------------
+
+test('Phase1: WHERE句がPL/SQL変数でも「条件あり」と判定され、no-where-updateは出ない', () => {
+  const sql = 'BEGIN\n  UPDATE orders SET status = 1 WHERE order_id = v_orders(i).order_id;\nEND;\n/';
+  const u = plsqlUnit(sql);
+  const item = u.plsql.items[0];
+  assert.ok(!hasCode(item.findings, 'no-where-update'), '変数条件を「WHERE無し」と誤判定しています');
+  assert.equal(item.verifySelect, 'SELECT COUNT(*) FROM orders WHERE order_id = v_orders(i).order_id;');
+  assert.ok(item.verifySelectHasRuntimeVariable, '実行時変数が残っていることを示すフラグが立っていません');
+});
+
+test('Phase1: 抽出DMLにWHERE漏れがあると no-where-update が発火する', () => {
+  const sql = 'CREATE OR REPLACE PACKAGE BODY pkg_x AS\n'
+    + '  PROCEDURE p1 IS\n  BEGIN\n'
+    + "    UPDATE orders SET status = 'PROCESSED', processed_at = SYSDATE;\n"
+    + '  END p1;\nEND pkg_x;\n/';
+  const u = plsqlUnit(sql);
+  const item = u.plsql.items[0];
+  const f = findCode(item.findings, 'no-where-update');
+  assert.ok(f, 'PL/SQL内部のWHERE漏れUPDATEが検出できていません');
+  assert.equal(f.severity, 'danger');
+});
+
+test('Phase1: 抽出DMLにWHERE漏れDELETEがあると no-where-delete が発火する', () => {
+  const sql = 'BEGIN\n  DELETE FROM orders;\nEND;\n/';
+  const u = plsqlUnit(sql);
+  assert.ok(hasCode(u.plsql.items[0].findings, 'no-where-delete'));
+});
+
+test('Phase1: 抽出DMLの OR 1=1 も always-true-where で検出される', () => {
+  const sql = 'BEGIN\n  UPDATE orders SET status = 1 WHERE order_id = 7 OR 1=1;\nEND;\n/';
+  const u = plsqlUnit(sql);
+  assert.ok(hasCode(u.plsql.items[0].findings, 'always-true-where'));
+});
+
+test("Phase1: 抽出DMLの LIKE '%...' も like-leading-wildcard で検出される", () => {
+  const sql = "BEGIN\n  DELETE FROM orders WHERE code LIKE '%X';\nEND;\n/";
+  const u = plsqlUnit(sql);
+  assert.ok(hasCode(u.plsql.items[0].findings, 'like-leading-wildcard'));
+});
+
+// --- フォールバック --------------------------------------------------------
+
+test('Phase1: DMLを1本も抽出できない実行ブロックは従来通り unanalyzed-statement 警告を出す', () => {
+  const sql = "BEGIN\n  EXECUTE IMMEDIATE 'DELETE FROM t';\n  DBMS_OUTPUT.PUT_LINE('done');\nEND;\n/";
+  const u = plsqlUnit(sql);
+  assert.equal(u.plsql.items.length, 0);
+  const f = findCode(u.findings, 'unanalyzed-statement');
+  assert.ok(f, 'DMLゼロ件のブロックが無警告で素通りしています');
+  assert.equal(f.severity, 'warning');
+});
+
+test('Phase1: パッケージ仕様部（宣言のみ・実行部なし）はDMLゼロでも danger 扱いにしない', () => {
+  const sql = 'CREATE OR REPLACE PACKAGE pkg_x AS\n  PROCEDURE p1(p_a IN NUMBER);\n  FUNCTION f1 RETURN NUMBER;\nEND pkg_x;\n/';
+  const u = plsqlUnit(sql);
+  assert.equal(u.plsql.items.length, 0);
+  assert.ok(!hasCode(u.findings, 'unanalyzed-statement'), '宣言だけの仕様部を「解析できなかった」扱いにしないこと');
+  assert.ok(hasCode(u.findings, 'plsql-declaration-only'));
+  assert.equal(u.plsql.procedureCount, 1);
+  assert.equal(u.plsql.functionCount, 1);
+});
+
+// --- 既存挙動の非破壊 ------------------------------------------------------
+
+test('Phase1: `/` 終端行のない通常SQLスクリプトは従来通りセミコロン分割される', () => {
+  const sql = 'UPDATE a SET x = 1 WHERE id = 1;\nDELETE FROM b WHERE id = 2;';
+  const result = analyzeSQL(sql, 'oracle');
+  assert.equal(result.statements.length, 2);
+  assert.ok(result.statements.every((s) => s.kind !== 'PLSQL_UNIT'));
+});
+
+test('Phase1: T-SQLの BEGIN TRAN スクリプトをPL/SQLユニット扱いにしない（誤検知しない）', () => {
+  const sql = 'BEGIN TRAN\nUPDATE a SET x = 1 WHERE id = 1;\nCOMMIT\n';
+  const result = analyzeSQL(sql, 'mssql');
+  assert.ok(result.statements.every((s) => s.kind !== 'PLSQL_UNIT'));
+});
+
+test('Phase1: PL/SQLユニットとその後の通常SQLが混在しても両方解析される', () => {
+  const sql = 'BEGIN\n  UPDATE t SET a = 1 WHERE id = 1;\nEND;\n/\n'
+    + 'DELETE FROM logs WHERE id = 2;\n';
+  const result = analyzeSQL(sql, 'oracle');
+  assert.equal(result.statements.length, 2);
+  assert.equal(result.statements[0].kind, 'PLSQL_UNIT');
+  assert.equal(result.statements[1].kind, 'DELETE');
+});
+
+test('Phase1: PL/SQLユニットが触るテーブルは全体サマリの「触るテーブル」に持ち上がる', () => {
+  const sql = 'BEGIN\n  UPDATE orders SET a = 1 WHERE id = 1;\nEND;\n/';
+  const u = plsqlUnit(sql);
+  assert.deepEqual(u.tables.map((t) => t.toLowerCase()), ['orders']);
+});
+
+test('Phase1: PL/SQL内部の危険は overview.warnedStatements に載る', () => {
+  const sql = 'BEGIN\n  UPDATE orders SET a = 1;\nEND;\n/\n'
+    + 'SELECT 1 FROM dual;\nSELECT 2 FROM dual;\nSELECT 3 FROM dual;\nSELECT 4 FROM dual;\nSELECT 5 FROM dual;';
+  const result = analyzeSQL(sql, 'oracle');
+  assert.ok(result.overview, 'overviewがありません');
+  assert.ok(result.overview.warnedStatements.includes(1), 'PL/SQL内部の危険が全体サマリから漏れています');
+});
+
+// --- 実サンプルでの受け入れ検証 -------------------------------------------
+
+test('Phase1[受け入れサンプル]: 仕様部と本体の2ユニットに分かれる', () => {
+  const sql = REAL_SAMPLE;
+  const result = analyzeSQL(sql, 'oracle');
+  assert.equal(result.statements.length, 2);
+  assert.equal(result.statements[0].plsql.header, 'PACKAGE pkg_order_batch');
+  assert.equal(result.statements[1].plsql.header, 'PACKAGE BODY pkg_order_batch');
+});
+
+test('Phase1[受け入れサンプル]: 仕様部はDMLなし・構造表示のみ（danger扱いにしない）', () => {
+  const sql = REAL_SAMPLE;
+  const spec = analyzeSQL(sql, 'oracle').statements[0];
+  assert.equal(spec.plsql.items.length, 0);
+  assert.equal(spec.plsql.procedureCount, 1);
+  assert.ok(!hasCode(spec.findings, 'unanalyzed-statement'));
+});
+
+test('Phase1[受け入れサンプル]: 本体からUPDATE1本・INSERT1本・カーソル1個を抽出する', () => {
+  const sql = REAL_SAMPLE;
+  const body = analyzeSQL(sql, 'oracle').statements[1];
+  assert.equal(body.plsql.procedureCount, 2);
+  assert.equal(body.plsql.cursorCount, 1);
+  assert.ok(body.plsql.hasCommit);
+  assert.ok(body.plsql.hasRollback);
+  assert.deepEqual(itemKinds(body).sort(), ['CURSOR', 'INSERT', 'UPDATE']);
+  assert.match(body.plsql.structure, /プロシージャ2個 \/ 抽出したDML: UPDATE 1本・INSERT 1本 \/ カーソル1個 \/ COMMITあり・ROLLBACKあり/);
+});
+
+test('Phase1[受け入れサンプル]: FORALL内UPDATEのWHERE（order_id = v_orders(i).order_id）が「条件あり」と判定される', () => {
+  const sql = REAL_SAMPLE;
+  const body = analyzeSQL(sql, 'oracle').statements[1];
+  const upd = body.plsql.items.find((i) => i.kind === 'UPDATE');
+  assert.ok(upd, 'FORALL内のUPDATEが抽出されていません');
+  assert.equal(upd.findings.length, 0, `想定外のfindings: ${JSON.stringify(upd.findings)}`);
+  assert.equal(upd.verifySelect, 'SELECT COUNT(*) FROM orders WHERE order_id = v_orders(i).order_id;');
+  assert.ok(upd.verifySelectHasRuntimeVariable);
+});
+
+test('Phase1[受け入れサンプル]: WHERE句を落とした改変版では no-where-update が発火する', () => {
+  const sql = REAL_SAMPLE;
+  const broken = sql.replace(/\s*WHERE order_id = v_orders\(i\)\.order_id;/, ';');
+  assert.notEqual(broken, sql, '改変が効いていません（テストの前提が崩れています）');
+  const body = analyzeSQL(broken, 'oracle').statements[1];
+  const upd = body.plsql.items.find((i) => i.kind === 'UPDATE');
+  assert.ok(upd);
+  assert.ok(hasCode(upd.findings, 'no-where-update'), 'WHERE漏れを仕込んでも検出できていません');
+});
+
+test('Phase1[境界サンプル]: q\'記法・文字列内セミコロン入りでも正しく抽出できる', () => {
+  const sql = EDGE_SAMPLE;
+  const result = analyzeSQL(sql, 'oracle');
+  assert.equal(result.statements.length, 2);
+  const body = result.statements[1];
+  assert.deepEqual(itemKinds(body).sort(), ['CURSOR', 'INSERT', 'SELECT', 'UPDATE']);
+  const upd = body.plsql.items.find((i) => i.kind === 'UPDATE');
+  assert.equal(upd.findings.length, 0);
+  assert.match(upd.sql, /WHERE order_id = v_orders\(i\)\.order_id$/);
+});
+
+// --- 抽出ユーティリティの単体テスト ---------------------------------------
+
+test('Phase1: maskPlsql は文字列・コメント・q\'記法を無害化し、長さを保つ', () => {
+  const src = "a '--x' b -- c\n/* d */ e q'[f;g]' h";
+  const { plain, masked } = PlsqlExtract.maskPlsql(src);
+  assert.equal(masked.length, src.length, 'masked は元テキストと同じ長さでなければならない');
+  assert.equal(plain.length, src.length);
+  assert.ok(!/--x/.test(masked), '文字列の中身がマスクされていません');
+  assert.ok(!/;/.test(masked), "q'記法の中のセミコロンがマスクされていません");
+});
+
+test('Phase1: splitSlashChunks は文字列リテラル内の `/` 行では分割しない', () => {
+  const src = "BEGIN\n  v := '\n/\n';\nEND;\n/";
+  const chunks = PlsqlExtract.splitSlashChunks(src);
+  assert.equal(chunks.length, 1, '文字列リテラル内の `/` 行で分割されています');
 });
 
 // ---------------------------------------------------------------------------

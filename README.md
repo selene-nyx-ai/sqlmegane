@@ -34,11 +34,42 @@ v2 から、MySQL / PostgreSQL / SQL Server については本物のSQLパーサ
 | 汎用 | **簡易チェック（構文解析なし）** | なし | なし（正規表現ヒューリスティック） |
 
 - Oracle は node-sql-parser が対応していないため、従来どおり正規表現ベースの簡易チェックになります。画面上部に「簡易チェック（構文解析なし）」バッジを表示して明示します
+- ただし **PL/SQL については構造を認識し、中に埋め込まれたDMLを抽出して個別にチェックします**（下記「PL/SQL（Oracle）への対応」参照）
 - AST対応方言でも、パーサが解析できない構文だった場合は**その文だけ**簡易チェックへフォールバックし、「構文解析に失敗したため簡易チェックで表示しています（位置: 行X）」と表示します
 - PostgreSQL / SQL Server のパーサでは通らないが MySQL のパーサでは通る構文（例: `WITH ... DELETE`）については、諦める前に MySQL のパーサで1回だけ再解析し、その旨を文カードに表示します
 
+## PL/SQL（Oracle）への対応
+
+業務システムのOracleスクリプトは、その大半が PL/SQL のパッケージ／プロシージャの形をしています。
+ブラウザに同梱できる PL/SQL の完全なパーサは存在しないため、SQLMegane は
+**「完全にパースする」のではなく「構造を読み取って中のDMLを取り出す」** というアプローチを取ります。
+
+対象となる形（`/` だけの行で区切られた各チャンクごとに判定します）:
+
+- `CREATE OR REPLACE PACKAGE` / `PACKAGE BODY` / `PROCEDURE` / `FUNCTION` / `TRIGGER` / `TYPE`
+- `DECLARE ... BEGIN ... END;`
+- `BEGIN ... END;`（無名ブロック）
+
+やること:
+
+1. **構造サマリの表示**: 「PL/SQLユニット: `PACKAGE BODY pkg_order_batch`」「プロシージャ2個 / 抽出したDML: UPDATE 1本・INSERT 1本 / カーソル1個 / COMMITあり・ROLLBACKあり」
+2. **埋め込みDMLの抽出**: 文の開始位置に現れる `INSERT` / `UPDATE` / `DELETE` / `MERGE` / `SELECT ... INTO`、および `CURSOR ... IS SELECT` のカーソル定義を1本ずつ切り出します。
+   文字列リテラル・コメント（`--`、`/* */`）・Oracleの代替引用符（`q'[...]'`）を正しくスキップし、括弧の深さを見ながら対応する `;` までを1文として扱います
+3. **抽出した1本ずつに通常のチェック**: WHERE句の有無、常に真になる条件、`LIKE '%...'`、検算SELECTの生成などを、通常の文と同じようにサブカードで表示します。
+   `FORALL i IN 1..n SAVE EXCEPTIONS UPDATE ... WHERE order_id = v_orders(i).order_id;` のように、キーワードとDMLの間に語が挟まる形にも対応しています
+4. **バインド変数・PL/SQL変数はそのまま保持**: `p_limit_size`、`v_orders(i).order_id`、`SQL%ROWCOUNT` などは「実行時に値が決まる変数」として扱い、リテラル同様「条件がある」とみなします。
+   生成した検算SELECTのWHERE句に変数が残る場合は「実行時の値に置き換えてください」と注記します
+
+**やらないこと（重要）**:
+
+- **制御フロー（ループ・分岐・例外処理）は解析していません。** どのDMLが実際に何回実行されるか、
+  例外時に何がロールバックされるかは判断していません。この点は毎回 info として画面に明示します
+- 動的SQL（`EXECUTE IMMEDIATE 'DELETE FROM ...'`）の文字列の中身は解析しません。
+  DMLを1本も抽出できなかったブロックは、従来どおり「解析できませんでした」の警告を出します
+
 ## 機能一覧
 
+- **PL/SQLユニットの構造認識と埋め込みDMLの抽出**（上記「PL/SQL（Oracle）への対応」）
 - **日本語要約（v2の主役）**: パースに成功した文について「このSQLは何をするか」を日本語のカードで表示します（警告より上）
   - 操作と対象: 「`m_users`（別名 u）の `deleted_flg` を更新します」
   - WHERE条件の言い換え: 「対象は `dept_cd` が '10' かつ `last_login` が '2024-01-01' より前である行です」。OR/ANDの入れ子は箇条書きのインデントで表現します
@@ -122,6 +153,9 @@ v2 から、MySQL / PostgreSQL / SQL Server については本物のSQLパーサ
 - 文字列リテラル内のバックスラッシュエスケープ（例: `'it\'s bad'`）はMySQL方言選択時のみ認識します。他の方言では標準SQLに合わせてバックスラッシュを特別扱いしません
 - テーブル名の抽出は `schema.table`、バッククォート/ダブルクォート/角カッコ識別子、および単純なテーブルエイリアス（`AS alias` / `alias`）に対応していますが、複雑なスキーマ修飾や動的な識別子、`DELETE t1 FROM t1 JOIN t2 ...` のような複雑なマルチテーブル構文には対応できない場合があります
 - トランザクションの検出は文字列ベースの近似です。プロシージャ内のネストしたトランザクション制御などは正しく追跡できません
+- **PL/SQLは「完全なパース」ではありません。** 構造を読み取ってDMLを取り出すだけで、制御フロー（ループ・分岐・例外処理）は解析していません。抽出したDMLが実際に何回実行されるか、例外時に何がロールバックされるかは判断していません
+- PL/SQLユニットの認識には `/` だけの行（SQL*Plus / SQLcl のブロック終端）を必須にしています。`/` で終端されていないPL/SQLブロックは、従来どおりセミコロンで分割されます（T-SQLの `BEGIN TRAN 〜 COMMIT` を誤ってPL/SQLブロック扱いにしないための、意図的に保守的な判定です）
+- T-SQL の `CREATE PROCEDURE ... AS BEGIN ... END` は今回のPL/SQL抽出の対象外です
 - **「危険が検出されない」ことは「安全である」ことを意味しません。** 本ツールは事故を減らす補助ツールであり、最終判断・実行は必ず人間が行ってください
 
 ## file:// 直開き対応（ESMを廃止した経緯）
@@ -163,7 +197,7 @@ v2 から、MySQL / PostgreSQL / SQL Server については本物のSQLパーサ
 
 ```
 sqlmegane/
-├── index.html            UI本体（vendor → sql-ast → summarizer → ast-rules → analyzer → app の順に読み込む）
+├── index.html            UI本体（vendor → sql-ast → summarizer → ast-rules → plsql-extract → analyzer → app の順に読み込む）
 ├── css/style.css         スタイル（ダーク基調）
 ├── js/vendor/            同梱サードパーティ（実行時の外部読み込みは一切なし）
 │   ├── node-sql-parser-mysql.js        node-sql-parser 5.4.0 UMD（MySQL方言）
@@ -174,11 +208,15 @@ sqlmegane/
 │                          AND/OR優先順位の正規化）
 ├── js/summarizer.js      日本語要約の生成（v2の主役。表示用データを返すだけでDOMは触らない）
 ├── js/ast-rules.js       AST基盤の検出ルール（既存ルールのAST版 + 新ルール3種）
+├── js/plsql-extract.js   PL/SQLの構造認識と埋め込みDMLの抽出（Oracle対応 Phase 1）。
+│                          文字列・コメント・q'記法をスキップしながらトークン走査する。
+│                          制御フローは解析しない（できないため、しないことを明示する）
 ├── js/analyzer.js        解析の司令塔＋正規表現フォールバック（IIFE + globalThis.SQLMeganeAnalyzer で公開。
 │                          ESMのexportは使わず、file://直開きでも動く通常のスクリプト）
 ├── js/app.js             UI結線（DOM操作のみ、解析ロジックは持たない）
 ├── tools/build-vendor.mjs js/vendor/ を node_modules から再生成するスクリプト（配布物には不要）
 ├── tests/run-tests.mjs   自動テスト（`node tests/run-tests.mjs` で実行）
+├── tests/fixtures/       受け入れ用のPL/SQLサンプル（パッケージ仕様部+本体、抽出境界ケース）
 └── package.json          "type": "module" 指定のみ。実行時の依存パッケージなし
 ```
 
