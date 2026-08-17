@@ -710,30 +710,30 @@ test('splitStatementsWithOffsets は元テキストでの開始位置を返す',
 // v2: 日本語要約 (summarizer.js)
 // ---------------------------------------------------------------------------
 
-test('要約: UPDATEは対象テーブル（別名つき）と更新列を述べる', () => {
+test('要約: UPDATEは対象テーブル（別名つき）・条件・SET句を一文にまとめる', () => {
   const s = firstStatement("UPDATE m_users u SET u.deleted_flg = 1 WHERE u.dept_cd = '10';", 'mysql');
   assert.ok(s.summary, '要約が生成されていません');
   assert.equal(s.summary.op, 'UPDATE');
-  assert.match(s.summary.headline, /`m_users`（別名 u）の `deleted_flg` を更新します/);
+  assert.equal(s.summary.headline, "`m_users`（別名 u）のうち、`u.dept_cd` が '10' と等しい行の `deleted_flg` を 1 に更新します");
 });
 
-test('要約: DELETEは対象テーブルからの削除であることを述べる', () => {
+test('要約: DELETEは対象テーブルと条件を一文にまとめる', () => {
   const s = firstStatement('DELETE FROM orders WHERE id = 7;', 'mysql');
   assert.equal(s.summary.op, 'DELETE');
-  assert.match(s.summary.headline, /`orders`から行を削除します/);
+  assert.equal(s.summary.headline, '`orders` のうち、`id` が 7 と等しい行を削除します');
 });
 
 test('要約: INSERTは追加先テーブルと列を述べる', () => {
   const s = firstStatement('INSERT INTO logs (a, b) VALUES (1, 2);', 'mysql');
   assert.equal(s.summary.op, 'INSERT');
-  assert.match(summaryText(s), /`logs`に行を追加します/);
+  assert.equal(s.summary.headline, '`logs` の `a`、`b` に固定値を 1 行追加します');
   assert.match(summaryText(s), /指定している列: `a`、`b`/);
 });
 
-test('要約: SELECTは取得元と取得列を述べる', () => {
+test('要約: SELECTは取得元・条件・取得列を一文にまとめる', () => {
   const s = firstStatement('SELECT id, name FROM users WHERE id = 1;', 'mysql');
   assert.equal(s.summary.op, 'SELECT');
-  assert.match(summaryText(s), /`users`から行を取得します/);
+  assert.equal(s.summary.headline, '`users` のうち、`id` が 1 と等しい行の `id`、`name` を取得します');
 });
 
 test('要約: WHERE条件をANDでつないだ日本語に言い換える', () => {
@@ -818,6 +818,220 @@ test('要約: 対応しない文（トランザクション制御）ではnull�
 test('要約: 条件を要約できない場合は黙って省略せず、その旨を書く', () => {
   const { conditionText } = globalThis.SQLMeganeSummarizer._internal;
   assert.match(conditionText({ type: 'unknown_node' }), /要約できませんでした/);
+});
+
+// ---------------------------------------------------------------------------
+// v2: 見出しの一文統合要約
+//
+// 見出しの一文だけで「どの行に何が起きるか」が分かることを検証する。
+// 詳細ブロック（JOIN説明・WHERE箇条書き）は従来どおり残っていることも併せて確認する。
+// ---------------------------------------------------------------------------
+
+function headline(sql, dialect) {
+  const s = firstStatement(sql, dialect || 'mysql');
+  assert.ok(s.summary, `要約が生成されていません: ${sql}`);
+  return s.summary.headline;
+}
+
+test('見出し1: しぐれさん指摘のSQL — JOIN・WHERE・SETがすべて一文に入る', () => {
+  const h = headline('UPDATE users u LEFT JOIN orders o ON u.id = o.user_id SET u.flag = 1 WHERE o.total > 100;');
+  // LEFT JOIN が WHERE で打ち消されている（NULL行は必ず落ちる）ので「一致する行がある」が正しい
+  assert.equal(h, '`orders` に一致する行がある `users`（別名 u）のうち、`o.total` が 100 より大きい行の `flag` を 1 に更新します');
+});
+
+test('見出し1: INNER JOIN は「`X` に一致する行がある」を対象テーブルの前に織り込む', () => {
+  assert.equal(
+    headline('UPDATE a JOIN b ON a.id = b.aid SET a.x = 1 WHERE b.y > 2;'),
+    '`b` に一致する行がある `a` のうち、`b.y` が 2 より大きい行の `x` を 1 に更新します'
+  );
+});
+
+test('見出し1: WHEREで絞っていないLEFT JOINは「一致の有無にかかわらず」', () => {
+  assert.equal(
+    headline('SELECT u.id, u.name FROM users u LEFT JOIN orders o ON u.id = o.user_id;'),
+    '`orders` との一致の有無にかかわらず `users`（別名 u）の全行の `u.id`、`u.name` を取得します'
+  );
+});
+
+test('見出し1: LEFT JOIN + IS NULL のアンチジョインは「一致する行が無い」に畳み込む', () => {
+  // IS NULL はJOIN要旨に吸収されるので、WHERE要旨としては重ねて書かない
+  assert.equal(
+    headline('DELETE u FROM users u LEFT JOIN orders o ON u.id = o.user_id WHERE o.id IS NULL;'),
+    '`orders` に一致する行が無い `users`（別名 u）の行を削除します'
+  );
+});
+
+test('見出し1: JOIN 2個は連結する', () => {
+  assert.equal(
+    headline('UPDATE a JOIN b ON a.id = b.aid JOIN c ON c.id = a.cid SET a.x = 1 WHERE b.y > 2;'),
+    '`b` に一致する行があり、`c` に一致する行がある `a` のうち、`b.y` が 2 より大きい行の `x` を 1 に更新します'
+  );
+});
+
+test('見出し1: JOIN 3個以上は「複数のテーブルと結合した」に要約し、詳細はJOINブロックに残す', () => {
+  const sql = 'UPDATE a JOIN b ON a.id = b.aid JOIN c ON c.id = a.cid JOIN d ON d.id = a.did SET a.x = 1 WHERE b.y > 2;';
+  const h = headline(sql);
+  assert.match(h, /^複数のテーブルと結合した `a` のうち、/);
+  assert.ok(!/`b` に一致する行がある/.test(h), '3個以上のJOINを一文に並べています');
+  const s = firstStatement(sql, 'mysql');
+  assert.equal(s.summary.blocks.filter((b) => b.type === 'join').length, 3, 'JOINの詳細ブロックが減っています');
+});
+
+test('見出し1: CROSS JOIN は総当たりであることを織り込み、「全行」とは言い切らない', () => {
+  const h = headline('SELECT * FROM a CROSS JOIN b;');
+  assert.equal(h, '`b` と総当たりで組み合わせた `a` の すべての列（*） を取得します');
+  assert.ok(!/全行/.test(h), '結合で行が落ちうるのに「全行」と言い切っています');
+});
+
+test('見出し2: 葉が3個以下のANDは全部を一文に織り込む', () => {
+  assert.equal(
+    headline("UPDATE t SET x = 1 WHERE a = 1 AND b = '10';"),
+    "`t` のうち、`a` が 1 と等しく、かつ `b` が '10' と等しい行の `x` を 1 に更新します"
+  );
+});
+
+test('見出し2: 葉が3個のORも全部を一文に織り込む', () => {
+  assert.equal(
+    headline("UPDATE users SET flag = 1 WHERE dept = 'x' OR dept = 'y' OR dept = 'z';"),
+    "`users` のうち、`dept` が 'x' と等しい、または `dept` が 'y' と等しい、または `dept` が 'z' と等しい行の `flag` を 1 に更新します"
+  );
+});
+
+test('見出し2: 葉が4個以上のANDは2つだけ挙げて省略を明示する', () => {
+  const h = headline('UPDATE t SET x = 1 WHERE a = 1 AND b = 2 AND c = 3 AND d = 4;');
+  assert.equal(h, '`t` のうち、`a` が 1 と等しい、`b` が 2 と等しいなど、複数の条件をすべて満たす行の `x` を 1 に更新します');
+  assert.ok(!/`c` が 3/.test(h), '省略するはずの条件まで書いています');
+});
+
+test('見出し2: 深い入れ子は浅い条件だけ挙げて省略を明示する', () => {
+  assert.equal(
+    headline('UPDATE t SET x = 1 WHERE (a = 1 OR b = 2) AND c = 3;'),
+    '`t` のうち、`c` が 3 と等しいなど、複数の条件をすべて満たす行の `x` を 1 に更新します'
+  );
+});
+
+test('見出し2: 4個以上でも詳細のWHERE箇条書きは従来どおり全条件を保つ（ルール6）', () => {
+  const s = firstStatement('UPDATE t SET x = 1 WHERE a = 1 AND b = 2 AND c = 3 AND d = 4;', 'mysql');
+  const text = summaryText(s);
+  for (const col of ['`a`', '`b`', '`c`', '`d`']) assert.match(text, new RegExp(`${col} が`));
+});
+
+test('見出し3: WHERE無しのUPDATEは「全行」を強調表示つきで言い切る', () => {
+  const s = firstStatement('UPDATE users SET flag = 1;', 'mysql');
+  assert.equal(s.summary.headline, '`users` の全行の `flag` を 1 に更新します');
+  const strong = s.summary.headlineParts.filter((p) => p.strong).map((p) => p.text);
+  assert.deepEqual(strong, ['全行']);
+});
+
+test('見出し3: WHERE無しのDELETEも「全行」を強調表示する', () => {
+  const s = firstStatement('DELETE FROM users;', 'mysql');
+  assert.equal(s.summary.headline, '`users` の全行を削除します');
+  assert.ok(s.summary.headlineParts.some((p) => p.strong && p.text === '全行'));
+});
+
+test('見出し3: 結合で行が落ちうる場合はWHERE無しでも「全行」と言わない', () => {
+  const h = headline('UPDATE a JOIN b ON a.id = b.aid SET a.x = 1;');
+  assert.equal(h, '`b` に一致する行がある `a` の `x` を 1 に更新します');
+  assert.ok(!/全行/.test(h));
+});
+
+test('見出し4: SET句が1〜2列なら値まで織り込む', () => {
+  assert.equal(
+    headline("UPDATE t SET x = 1, y = 'a' WHERE id = 1;"),
+    "`t` のうち、`id` が 1 と等しい行の `x` を 1 に、`y` を 'a' に更新します"
+  );
+});
+
+test('見出し4: SET句が3列以上なら列数に丸める', () => {
+  assert.equal(
+    headline('UPDATE t SET a = 1, b = 2, c = 3 WHERE x = 1;'),
+    '`t` のうち、`x` が 1 と等しい行の `a` など3列を更新します'
+  );
+});
+
+test('見出し5: AND/OR混在で係り受けが曖昧になる場合は「かつ／または」を作らず省略形へ落とす', () => {
+  // a = 1 OR b = 2 AND c = 3 は OR(a=1, AND(b=2, c=3))。
+  // これを一列に「かつ／または」で並べると読み手が優先順位を取り違えるため、
+  // トップレベルの関係（いずれか）だけを言い切って詳細は箇条書きに委ねる。
+  const h = headline('UPDATE t SET x = 1 WHERE a = 1 OR b = 2 AND c = 3;');
+  assert.equal(h, '`t` のうち、`a` が 1 と等しいなど、複数の条件のいずれかを満たす行の `x` を 1 に更新します');
+  assert.ok(!/かつ/.test(h), 'AND/OR混在なのに「かつ」を含む一文を作っています');
+});
+
+test('見出し5: 一文にできない条件は嘘をつかず「（条件の詳細は下記）」に落とす', () => {
+  const h = headline('UPDATE t SET x = 1 WHERE NOT (a = 1);');
+  assert.equal(h, '`t` のうち、条件に一致する行の `x` を 1 に更新します（条件の詳細は下記）');
+});
+
+test('見出し5: 注意書き付きの条件は見出しでは注意書きを外し、詳細側には残す', () => {
+  const s = firstStatement("DELETE FROM users WHERE name LIKE '%tanaka';", 'mysql');
+  assert.equal(s.summary.headline, "`users` のうち、`name` がパターン '%tanaka' に一致する行を削除します");
+  assert.match(summaryText(s), /先頭が % なので前方一致ではありません/);
+});
+
+test('見出し5: 括弧を外すと文でなくなる条件（常に真）は無理に織り込まない', () => {
+  const h = headline('UPDATE t SET x = 1 WHERE 1 = 1;');
+  assert.equal(h, '`t` のうち、条件に一致する行の `x` を 1 に更新します（条件の詳細は下記）');
+});
+
+test('見出し6: 一文を変えてもJOIN説明とWHERE箇条書きのブロックは残っている', () => {
+  const s = firstStatement('UPDATE users u LEFT JOIN orders o ON u.id = o.user_id SET u.flag = 1 WHERE o.total > 100;', 'mysql');
+  assert.ok(s.summary.blocks.some((b) => b.type === 'join' && /LEFT JOIN/.test(b.text)), 'JOIN説明ブロックがありません');
+  assert.match(summaryText(s), /対象は `o\.total` が 100 より大きい行です。/);
+});
+
+test('見出し7: SELECTの取得列は3列まで並べ、4列以上は列数に丸める', () => {
+  assert.equal(
+    headline('SELECT id, name, age, addr, tel FROM users WHERE id = 1;'),
+    '`users` のうち、`id` が 1 と等しい行の `id` など5列 を取得します'
+  );
+});
+
+test('見出し7: GROUP BYがあるSELECTは列を並べず「集計した結果」と述べる', () => {
+  assert.equal(
+    headline('SELECT dept, COUNT(*) FROM users GROUP BY dept;'),
+    '`users` の全行を集計した結果を取得します'
+  );
+});
+
+test('見出し7: INSERT ... SELECT は件数が読めないことまで一文に含める', () => {
+  assert.equal(
+    headline('INSERT INTO logs SELECT * FROM staging;'),
+    '`logs` に SELECT の結果をそのまま追加します（取得件数がそのまま追加件数になります）'
+  );
+});
+
+test('見出し7: TRUNCATEも「全行」を強調表示する', () => {
+  const s = firstStatement('TRUNCATE TABLE t;', 'mysql');
+  assert.equal(s.summary.headline, '`t` の全行を即座に削除します（多くの環境で取り消せません）');
+  assert.ok(s.summary.headlineParts.some((p) => p.strong && p.text === '全行'));
+});
+
+test('見出し7: DROPは定義ごと消えることを述べる', () => {
+  assert.equal(headline('DROP TABLE t;'), '`t` を定義ごと削除します');
+});
+
+test('見出し: 書き換え対象が結合された側でも、INNER JOINなら向きを入れ替えて言い切れる', () => {
+  assert.equal(
+    headline('DELETE o FROM users u JOIN orders o ON u.id = o.user_id WHERE u.active = 0;'),
+    '`users` に一致する行がある `orders`（別名 o）のうち、`u.active` が 0 と等しい行を削除します'
+  );
+});
+
+test('見出し: 書き換え対象が外部結合された側のときは断定せず「複数のテーブルと結合した」に落とす', () => {
+  const h = headline('DELETE o FROM users u RIGHT JOIN orders o ON u.id = o.user_id WHERE u.active = 1;');
+  assert.equal(h, '複数のテーブルと結合した `orders`（別名 o）のうち、`u.active` が 1 と等しい行を削除します');
+  assert.ok(!/一致する行が/.test(h), '向きが反転する外部結合で残る側を断定しています');
+});
+
+test('見出し: 連用形変換は conditionText が作る語尾だけを対象にし、想定外は null を返す', () => {
+  const { toRenyo } = globalThis.SQLMeganeSummarizer._internal;
+  assert.equal(toRenyo('`a` が 1 と等しい'), '`a` が 1 と等しく');
+  assert.equal(toRenyo('`a` が NULL である'), '`a` が NULL であり');
+  assert.equal(toRenyo('`a` が NULL でない'), '`a` が NULL でなく');
+  assert.equal(toRenyo('サブクエリに該当する行が存在しない'), 'サブクエリに該当する行が存在せず');
+  assert.equal(toRenyo('`a` がサブクエリの結果に含まれる'), '`a` がサブクエリの結果に含まれ');
+  assert.equal(toRenyo('常に真'), null);
 });
 
 // ---------------------------------------------------------------------------

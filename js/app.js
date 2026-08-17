@@ -187,13 +187,32 @@ function renderSummaryBlock(block) {
   return el('p', { className: cls, text: block.text });
 }
 
+/**
+ * 見出しは一文統合要約。summarizer が headlineParts（強調フラグ付きの断片）を
+ * 返す場合はそれを使い、「全行」のような危険な語を <strong> で立たせる。
+ * 断片が無い場合（将来の互換）はプレーンな headline をそのまま出す。
+ */
+function renderHeadline(summary) {
+  const p = el('p', { className: 'summary-headline' });
+  const parts = Array.isArray(summary.headlineParts) ? summary.headlineParts : null;
+  if (!parts || parts.length === 0) {
+    p.textContent = summary.headline;
+    return p;
+  }
+  for (const part of parts) {
+    if (part.strong) p.appendChild(el('strong', { className: 'summary-emphasis', text: part.text }));
+    else p.appendChild(document.createTextNode(part.text));
+  }
+  return p;
+}
+
 function renderSummary(summary) {
   const card = el('div', { className: 'stmt-summary' });
   const head = el('div', { className: 'summary-head' });
   head.appendChild(el('span', { className: 'summary-label', text: 'このSQLがすること' }));
   head.appendChild(el('span', { className: 'summary-op', text: summary.op }));
   card.appendChild(head);
-  card.appendChild(el('p', { className: 'summary-headline', text: summary.headline }));
+  card.appendChild(renderHeadline(summary));
   for (const block of summary.blocks) {
     card.appendChild(renderSummaryBlock(block));
   }

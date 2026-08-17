@@ -739,6 +739,14 @@ body {
   word-break: break-word;
 }
 
+/* 見出しの中で「全行」のような取り返しのつかない範囲を立たせる */
+.summary-emphasis {
+  color: var(--danger);
+  background: var(--danger-bg);
+  border-radius: 4px;
+  padding: 0 4px;
+}
+
 .summary-line {
   margin: 5px 0;
   font-size: 0.85rem;

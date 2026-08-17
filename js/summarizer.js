@@ -293,6 +293,317 @@ function joinBlocks(rowSource) {
 }
 
 // ---------------------------------------------------------------------------
+// 見出し（headline）の一文統合
+// ---------------------------------------------------------------------------
+//
+// 見出しの一文だけ読めば「どの行に何が起きるか」が分かることを目標にする。
+// 構成は [JOIN要旨] 対象テーブル のうち、[WHERE要旨] 行の [操作] 。
+//
+// 【最優先は正確性】。一文に織り込むと意味が変わる・係り受けが曖昧になる場合は、
+// 無理に短くせず省略形（「…など、複数の条件を…満たす」「（条件の詳細は下記）」）へ
+// 落とす。下部の詳細ブロック（JOIN説明・WHERE箇条書き）が常に「正」で、
+// 見出しはあくまで要旨。嘘をつくくらいなら長いか不完全な方がまし。
+
+/** 一文に織り込める条件文の上限（AND/ORの葉の数）。超えたら省略形へ */
+const HEADLINE_INLINE_LEAF_MAX = 3;
+/** 省略形で名前を挙げる条件の数 */
+const HEADLINE_NAMED_ON_OMIT = 2;
+
+const DETAIL_NOTE = '（条件の詳細は下記）';
+
+// 終止形 → 連用形。conditionText() が実際に生成しうる語尾だけを対象にする。
+// 長い語尾から先に判定すること（「しない」を「ない」より先に見る）。
+const RENYO_SUFFIXES = [
+  ['である', 'であり'],
+  ['でない', 'でなく'],
+  ['しない', 'せず'],
+  ['れない', 'れず'],
+  ['する', 'し'],
+  ['れる', 'れ'],
+  ['ない', 'なく'],
+  ['い', 'く'],
+  ['る', 'り'],
+];
+
+/**
+ * 一文に織り込める条件文か。
+ * 「（…）」で終わる注釈付き（例: 常に真（TRUE）、NULLが含まれるため…）や
+ * 「次の条件に当てはまらない: …」のような入れ子説明、要約不能は
+ * そのまま「〜行」に繋ぐと日本語が壊れるので対象外にする。
+ */
+function inlinableCondition(text) {
+  if (!text || text === UNSUMMARIZED) return false;
+  if (/）$/.test(text)) return false;
+  if (text.includes(':')) return false;
+  return true;
+}
+
+/** 終止形の条件文を連用形にする。変換できない語尾なら null */
+function toRenyo(text) {
+  for (const [from, to] of RENYO_SUFFIXES) {
+    if (text.endsWith(from)) return text.slice(0, -from.length) + to;
+  }
+  return null;
+}
+
+/**
+ * 見出しに書く条件文。書けないなら null。
+ *
+ * conditionText() は「（先頭が % なので前方一致ではありません）」のような注意書きを
+ * 末尾に足すことがある。これは「〜行」に繋ぐと日本語が壊れるので見出しでは落とす
+ * （注意書き自体は下部のWHERE箇条書きにそのまま残るので情報は失われない）。
+ * ただし「常に真（TRUE）」「1（値そのもの）」のように、括弧を外すと文でなくなる
+ * ものまで落とすと意味不明になるため、外した後も述語で終わっている場合だけ採用する。
+ */
+function headlineLeafText(expr) {
+  const text = conditionText(expr);
+  if (inlinableCondition(text)) return text;
+  const stripped = text.replace(/（[^（）]*）$/, '');
+  if (stripped !== text && inlinableCondition(stripped) && toRenyo(stripped) !== null) return stripped;
+  return null;
+}
+
+function lowerName(s) {
+  return typeof s === 'string' ? s.toLowerCase() : null;
+}
+
+function refTableKey(node) {
+  const ref = A.columnRef(node);
+  return ref && ref.table ? lowerName(ref.table) : null;
+}
+
+// 「その列がNULLの行は必ず落ちる」比較演算子。外部結合の打ち消し判定に使う
+const CANCELLING_OPS = new Set(['=', '!=', '<>', '>', '<', '>=', '<=', 'LIKE', 'NOT LIKE', 'IN', 'BETWEEN']);
+
+/**
+ * LEFT JOIN された表が、WHERE句のトップレベルAND項でどう扱われているかを判定する。
+ *  - 'inner': NULL埋め行を必ず落とす条件がある（実質INNER JOIN）
+ *  - 'anti' : その表の列の IS NULL だけがある（アンチジョイン。IS NULL は要旨に吸収する）
+ *  - 'left' : WHEREで絞っていない（一致の有無にかかわらず残る）
+ * ORの下の条件は「他の条件で救われうる」ため見ない（topLevelAndParts の仕様）。
+ */
+function classifyOuterJoin(entry, andParts) {
+  const key = lowerName(entry.as || entry.table);
+  if (!key) return { kind: 'left', consumed: [] };
+
+  const isNulls = [];
+  let cancelling = false;
+  for (const part of andParts) {
+    if (!part || part.type !== 'binary_expr') continue;
+    const op = String(part.operator || '').toUpperCase();
+    const touches = refTableKey(part.left) === key || refTableKey(part.right) === key;
+    if (!touches) continue;
+    if (op === 'IS' && part.right && part.right.type === 'null' && refTableKey(part.left) === key) {
+      isNulls.push(part);
+    } else if (CANCELLING_OPS.has(op) || (op === 'IS NOT' && part.right && part.right.type === 'null')) {
+      cancelling = true;
+    }
+  }
+  // 打ち消しとアンチジョインが同居する場合（矛盾した条件）は、断定できる
+  // 「実質INNER」を採り、IS NULL は WHERE 要旨側に残して見えるようにする。
+  if (cancelling) return { kind: 'inner', consumed: [] };
+  if (isNulls.length > 0) return { kind: 'anti', consumed: isNulls };
+  return { kind: 'left', consumed: [] };
+}
+
+// restricting = その結合によって対象テーブル側の行が落ちうるか。
+// 落ちうる場合はWHERE句が無くても「全行」とは言い切れない。
+const GIST_INNER = (name) => ({ rentai: `${name} に一致する行がある`, renyo: `${name} に一致する行があり`, restricting: true });
+const GIST_ANTI = (name) => ({ rentai: `${name} に一致する行が無い`, renyo: `${name} に一致する行が無く`, restricting: true });
+const GIST_LEFT = (name) => ({ rentai: `${name} との一致の有無にかかわらず`, renyo: `${name} との一致の有無にかかわらず`, restricting: false });
+const GIST_CROSS = (name) => ({ rentai: `${name} と総当たりで組み合わせた`, renyo: `${name} と総当たりで組み合わせ`, restricting: true });
+const GIST_PLAIN = (name) => ({ rentai: `${name} と結合した`, renyo: `${name} と結合し`, restricting: true });
+const GIST_MANY = { rentai: '複数のテーブルと結合した', renyo: '複数のテーブルと結合し', restricting: true };
+
+function joinTableName(entry) {
+  return entry && entry.table ? q(entry.table) : '結合先';
+}
+
+/**
+ * JOIN の要旨（対象テーブルの前に置く連体修飾）と、要旨に吸収して
+ * WHERE要旨からは外してよい条件式（アンチジョインの IS NULL）を返す。
+ */
+function joinGist(ast, rowSource, targetTable) {
+  if (!rowSource || rowSource.length < 2) return { text: null, consumed: [], restricting: false };
+
+  const andParts = ast && ast.where ? A.topLevelAndParts(ast.where) : [];
+  const joins = rowSource.slice(1);
+  const baseName = lowerName(rowSource[0] && rowSource[0].table);
+  const targetName = lowerName(targetTable);
+  const baseIsTarget = !targetName || !baseName || baseName === targetName;
+
+  let gists;
+  let consumed = [];
+
+  if (baseIsTarget) {
+    gists = [];
+    for (const entry of joins) {
+      const kind = A.joinKind(entry);
+      const name = joinTableName(entry);
+      if (kind === 'CROSS') {
+        gists.push(GIST_CROSS(name));
+      } else if (kind === 'LEFT') {
+        const c = classifyOuterJoin(entry, andParts);
+        if (c.kind === 'inner') gists.push(GIST_INNER(name));
+        else if (c.kind === 'anti') { gists.push(GIST_ANTI(name)); consumed = consumed.concat(c.consumed); }
+        else gists.push(GIST_LEFT(name));
+      } else if (kind === 'RIGHT' || kind === 'FULL') {
+        // 残る側／落ちる側が対象テーブルとの関係で反転するため断定しない
+        gists.push(GIST_PLAIN(name));
+      } else {
+        gists.push(GIST_INNER(name));
+      }
+    }
+  } else {
+    // 書き換え対象が結合された側にある場合（DELETE o FROM users u JOIN orders o ...）。
+    // INNER JOIN は「両方に一致する行だけが残る」ので向きを入れ替えても言い切れるが、
+    // 外部結合は反転すると意味が変わるため、断定を避けて「複数のテーブルと結合した」に落とす。
+    const allInner = joins.every((e) => {
+      const k = A.joinKind(e);
+      return k === 'INNER' || k === null;
+    });
+    if (!allInner) return { text: GIST_MANY.rentai, consumed: [], restricting: true };
+    const others = rowSource.filter((e) => lowerName(e.table) !== targetName);
+    gists = others.map((e) => GIST_INNER(joinTableName(e)));
+  }
+
+  if (gists.length === 0) return { text: null, consumed: [], restricting: false };
+  const restricting = gists.some((g) => g.restricting);
+  if (gists.length === 1) return { text: gists[0].rentai, consumed, restricting };
+  if (gists.length === 2) return { text: `${gists[0].renyo}、${gists[1].rentai}`, consumed, restricting };
+  // 3個以上は一文に入れると読めなくなるので要約し、詳細は下部のJOINブロックに任せる。
+  // 要旨がアンチジョインを表現しなくなるため、条件の吸収も取り消す。
+  return { text: GIST_MANY.rentai, consumed: [], restricting: true };
+}
+
+/** 消費済み（JOIN要旨に吸収された）条件をANDツリーから取り除く */
+function pruneConsumed(node, consumed) {
+  if (consumed.size === 0) return node;
+  if (node.connector === null) return consumed.has(node.expr) ? null : node;
+  // ORの枝から条件を落とすと条件が緩む方向に意味が変わるため触らない
+  if (node.connector !== 'AND') return node;
+  const kids = [];
+  for (const c of node.children) {
+    const k = pruneConsumed(c, consumed);
+    if (k) kids.push(k);
+  }
+  if (kids.length === 0) return null;
+  if (kids.length === 1) return kids[0];
+  return { connector: 'AND', expr: null, children: kids };
+}
+
+function omitTail(connector) {
+  return connector === 'AND' ? 'など、複数の条件をすべて満たす' : 'など、複数の条件のいずれかを満たす';
+}
+
+function opaqueText(connector) {
+  return connector === 'AND' ? '複数の条件をすべて満たす' : '複数の条件のいずれかを満たす';
+}
+
+/** 論理ツリー（A.logicalTree のノード）を見出し用の一文の断片にする */
+function headlineConditionText(node) {
+  if (node.connector === null) {
+    const t = headlineLeafText(node.expr);
+    return t ? { text: t, note: false } : { text: '条件に一致する', note: true };
+  }
+
+  const flat = node.children.every((c) => c.connector === null);
+  if (flat && node.children.length <= HEADLINE_INLINE_LEAF_MAX) {
+    const texts = node.children.map((c) => headlineLeafText(c.expr));
+    if (texts.every((t) => t !== null)) {
+      const last = texts[texts.length - 1];
+      if (node.connector === 'OR') {
+        return { text: texts.join('、または '), note: false };
+      }
+      // AND は連用形で繋ぐ（「〜と等しく、かつ 〜」）
+      const heads = texts.slice(0, -1).map(toRenyo);
+      if (heads.every((h) => h !== null)) {
+        return { text: heads.concat([last]).join('、かつ '), note: false };
+      }
+    }
+  }
+
+  // 省略形: 浅い（直下の葉）条件を2つまで挙げ、省略していることを明示する。
+  // AND/OR混在で「かつ／または」の係り受けが曖昧になる文はここに落ちる。
+  // 挙げた条件どうしは並列に「、」で並べるだけにして、実際の関係（すべて／いずれか）は
+  // 末尾で言い切る。連用形で繋ぐとORでもANDに読めてしまうため。
+  const named = [];
+  for (const c of node.children) {
+    if (named.length >= HEADLINE_NAMED_ON_OMIT) break;
+    if (c.connector !== null) continue;
+    const t = headlineLeafText(c.expr);
+    if (t) named.push(t);
+  }
+  if (named.length === 0) return { text: opaqueText(node.connector), note: true };
+  return { text: named.join('、') + omitTail(node.connector), note: false };
+}
+
+/**
+ * WHERE の要旨。
+ *  { kind: 'all-rows' }                … WHERE句なし（絞り込みゼロ）
+ *  { kind: 'none' }                    … 条件がすべてJOIN要旨に吸収された
+ *  { kind: 'text', text, note }        … 一文に織り込む条件（note=true なら省略の明示が必要）
+ */
+function whereGist(ast, consumedList) {
+  if (!ast || !ast.where) return { kind: 'all-rows' };
+  const consumed = new Set(consumedList || []);
+  const pruned = pruneConsumed(A.logicalTree(ast.where), consumed);
+  if (!pruned) return { kind: 'none' };
+  const r = headlineConditionText(pruned);
+  return { kind: 'text', text: r.text, note: r.note };
+}
+
+// --- 見出しの部品組み立て --------------------------------------------------
+
+function pushPart(parts, value) {
+  if (value == null || value === '') return;
+  parts.push(typeof value === 'string' ? { text: value, strong: false } : value);
+}
+
+/**
+ * 助詞の前に空ける半角スペース。`users` のようにバッククォートで終わる直後は
+ * 空けたほうが読みやすいが、「（別名 u）」のように全角の閉じ括弧で終わる場合は
+ * 空けると間延びするので詰める。
+ */
+function particleSpace(parts) {
+  const prev = parts.length > 0 ? parts[parts.length - 1].text : '';
+  return /[）」』】]$/.test(prev) ? '' : ' ';
+}
+
+/**
+ * 「[JOIN要旨] 対象テーブル のうち、[WHERE要旨] 行」までを組み立てる。
+ * endsWithRow は「行」「全行」で終わったか（後続の助詞の付け方が変わる）。
+ */
+function subjectParts(targetLabel, gist, where, emphasizeAllRows) {
+  const parts = [];
+  if (gist.text) { pushPart(parts, gist.text); pushPart(parts, ' '); }
+  pushPart(parts, targetLabel);
+
+  if (where.kind === 'all-rows') {
+    // 結合で行が落ちうる場合、WHERE句が無くても「全行」ではない。嘘になるので言わない。
+    if (gist.restricting) return { parts, endsWithRow: false, note: false };
+    pushPart(parts, `${particleSpace(parts)}の`);
+    parts.push({ text: '全行', strong: !!emphasizeAllRows });
+    return { parts, endsWithRow: true, note: false };
+  }
+  if (where.kind === 'none') {
+    return { parts, endsWithRow: false, note: false };
+  }
+  pushPart(parts, `${particleSpace(parts)}のうち、`);
+  pushPart(parts, where.text);
+  pushPart(parts, '行');
+  return { parts, endsWithRow: true, note: where.note };
+}
+
+function finishHeadline(parts, note) {
+  if (note) pushPart(parts, DETAIL_NOTE);
+  return {
+    headline: parts.map((p) => p.text).join(''),
+    headlineParts: parts,
+  };
+}
+
+// ---------------------------------------------------------------------------
 // 文種別ごとの要約
 // ---------------------------------------------------------------------------
 
@@ -333,11 +644,25 @@ function whereBlocks(ast, kind) {
   return blocks;
 }
 
+/** SET句を見出しに織り込む断片。1〜2列は値まで、3列以上は列数に丸める */
+function setPhrase(ast) {
+  const sets = Array.isArray(ast.set) ? ast.set : [];
+  const cols = sets.map((s) => A.columnName(s.column));
+  if (sets.length === 0 || cols.some((c) => c == null)) {
+    return cols.length > 0
+      ? `${cols.map(columnLabel).join('、')} を更新します`
+      : '（不明な列）を更新します';
+  }
+  if (sets.length <= 2) {
+    const pairs = sets.map((s, i) => `${columnLabel(cols[i])} を ${valueText(s.value)} に`);
+    return `${pairs.join('、')}更新します`;
+  }
+  return `${columnLabel(cols[0])} など${sets.length}列を更新します`;
+}
+
 function summarizeUpdate(ast) {
   const rowSource = A.rowSourceTables(ast);
   const targets = A.writeTargets(ast);
-  const cols = (ast.set || []).map((s) => A.columnName(s.column)).filter((c) => c != null);
-  const colText = cols.length > 0 ? cols.map(columnLabel).join('、') : '（不明な列）';
 
   const blocks = [];
   if (rowSource.length > 1) {
@@ -351,11 +676,13 @@ function summarizeUpdate(ast) {
   blocks.push(...joinBlocks(rowSource));
   blocks.push(...whereBlocks(ast, 'UPDATE'));
 
-  return {
-    op: 'UPDATE',
-    headline: `${tableLabels(targets)}の ${colText} を更新します`,
-    blocks,
-  };
+  const gist = joinGist(ast, rowSource, targets[0] && targets[0].table);
+  const where = whereGist(ast, gist.consumed);
+  const subj = subjectParts(tableLabels(targets), gist, where, true);
+  pushPart(subj.parts, subj.endsWithRow ? 'の ' : `${particleSpace(subj.parts)}の `);
+  pushPart(subj.parts, setPhrase(ast));
+
+  return Object.assign({ op: 'UPDATE', blocks }, finishHeadline(subj.parts, subj.note));
 }
 
 function summarizeDelete(ast) {
@@ -372,11 +699,13 @@ function summarizeDelete(ast) {
   blocks.push(...joinBlocks(rowSource));
   blocks.push(...whereBlocks(ast, 'DELETE'));
 
-  return {
-    op: 'DELETE',
-    headline: `${tableLabels(targets)}から行を削除します`,
-    blocks,
-  };
+  const gist = joinGist(ast, rowSource, targets[0] && targets[0].table);
+  const where = whereGist(ast, gist.consumed);
+  const subj = subjectParts(tableLabels(targets), gist, where, true);
+  if (!subj.endsWithRow) pushPart(subj.parts, `${particleSpace(subj.parts)}の行`);
+  pushPart(subj.parts, 'を削除します');
+
+  return Object.assign({ op: 'DELETE', blocks }, finishHeadline(subj.parts, subj.note));
 }
 
 function summarizeInsert(ast) {
@@ -397,27 +726,66 @@ function summarizeInsert(ast) {
     if (setBlock) blocks.push(setBlock);
   }
 
-  return {
-    op: 'INSERT',
-    headline: `${tableLabels(targets)}に行を追加します`,
-    blocks,
-  };
+  // INSERT には JOIN / WHERE が無いので、「どこに・何を・何行」を一文にまとめる。
+  const label = tableLabels(targets);
+  const colPhrase = cols.length === 0
+    ? ''
+    : (cols.length <= 3
+      ? ` の ${cols.map(columnLabel).join('、')}`
+      : ` の ${columnLabel(cols[0])} など${cols.length}列`);
+  const headParts = [];
+  pushPart(headParts, label + colPhrase + ' に');
+  if (values && values.type === 'values' && Array.isArray(values.values)) {
+    pushPart(headParts, `固定値を ${values.values.length} 行追加します`);
+  } else if (values && (values.type === 'select' || values.ast)) {
+    pushPart(headParts, ' SELECT の結果をそのまま追加します（取得件数がそのまま追加件数になります）');
+  } else if (Array.isArray(ast.set) && ast.set.length > 0) {
+    const sets = ast.set;
+    if (sets.length <= 2) {
+      const pairs = sets.map((s) => `${columnLabel(A.columnName(s.column))} を ${valueText(s.value)} に`);
+      pushPart(headParts, `${pairs.join('、')}した行を 1 行追加します`);
+    } else {
+      pushPart(headParts, `${columnLabel(A.columnName(sets[0].column))} など${sets.length}列を設定した行を 1 行追加します`);
+    }
+  } else {
+    pushPart(headParts, '行を追加します');
+  }
+
+  return Object.assign({ op: 'INSERT', blocks }, finishHeadline(headParts, false));
+}
+
+function selectColumnNames(ast) {
+  const cols = Array.isArray(ast.columns) ? ast.columns : [];
+  return cols.map((c) => {
+    if (c && c.as) return `${valueText(c.expr)}（別名 ${c.as}）`;
+    return c && c.expr ? valueText(c.expr) : '（式）';
+  });
+}
+
+function selectIsStar(ast) {
+  const cols = Array.isArray(ast.columns) ? ast.columns : [];
+  return cols.length === 0
+    || (cols.length === 1 && (cols[0] === '*' || (cols[0] && cols[0].expr && (cols[0].expr.type === 'star' || A.columnName(cols[0].expr.column) === '*'))));
+}
+
+/** 取得する列を見出しに織り込む断片。3列までは並べ、4列以上は列数に丸める */
+function selectColumnsPhrase(ast) {
+  if (selectIsStar(ast)) return 'すべての列（*）';
+  const names = selectColumnNames(ast);
+  if (names.length <= 3) return names.join('、');
+  return `${names[0]} など${names.length}列`;
 }
 
 function summarizeSelect(ast) {
   const rowSource = A.rowSourceTables(ast);
   const blocks = [];
 
-  const cols = Array.isArray(ast.columns) ? ast.columns : [];
-  const isStar = cols.length === 1 && (cols[0] === '*' || (cols[0] && cols[0].expr && (cols[0].expr.type === 'star' || A.columnName(cols[0].expr.column) === '*')));
-  if (isStar || cols.length === 0) {
+  if (selectIsStar(ast)) {
     blocks.push({ type: 'text', text: '取得する列: すべての列（*）' });
   } else {
-    const names = cols.slice(0, 8).map((c) => {
-      if (c && c.as) return `${valueText(c.expr)}（別名 ${c.as}）`;
-      return c && c.expr ? valueText(c.expr) : '（式）';
-    });
-    const more = cols.length > 8 ? ` ほか${cols.length - 8}件` : '';
+    const all = selectColumnNames(ast);
+    const names = all.slice(0, 8);
+    const more = all.length > 8 ? ` ほか${all.length - 8}件` : '';
     blocks.push({ type: 'text', text: `取得する列: ${names.join('、')}${more}` });
   }
 
@@ -429,15 +797,32 @@ function summarizeSelect(ast) {
     blocks.push({ type: 'text', text: `LIMIT による件数制限があります（${ast.limit.value.map(valueText).join(', ')}）。` });
   }
 
-  return {
-    op: 'SELECT',
-    headline: rowSource.length > 0 ? `${tableLabels(rowSource.slice(0, 1))}から行を取得します` : '行を取得します',
-    blocks,
-  };
+  if (rowSource.length === 0) {
+    return Object.assign({ op: 'SELECT', blocks }, finishHeadline([{ text: '行を取得します', strong: false }], false));
+  }
+
+  const gist = joinGist(ast, rowSource, rowSource[0] && rowSource[0].table);
+  const where = whereGist(ast, gist.consumed);
+  // SELECT の「全行」は危険を意味しないので強調はしない
+  const subj = subjectParts(tableLabels(rowSource.slice(0, 1)), gist, where, false);
+
+  if (ast.groupby) {
+    // GROUP BY があると返るのは集計結果で、行と列の対応がそのままではない。
+    // 列名を並べると誤読させるため、集計であることだけを述べる。
+    if (!subj.endsWithRow) pushPart(subj.parts, `${particleSpace(subj.parts)}の行`);
+    pushPart(subj.parts, 'を集計した結果を取得します');
+  } else {
+    pushPart(subj.parts, subj.endsWithRow ? 'の ' : `${particleSpace(subj.parts)}の `);
+    pushPart(subj.parts, `${selectColumnsPhrase(ast)} を取得します`);
+  }
+
+  return Object.assign({ op: 'SELECT', blocks }, finishHeadline(subj.parts, subj.note));
 }
 
-function summarizeSimple(op, headline) {
-  return { op, headline, blocks: [] };
+function summarizeSimple(op, parts) {
+  return Object.assign({ op, blocks: [] }, finishHeadline(parts.map(
+    (p) => (typeof p === 'string' ? { text: p, strong: false } : p)
+  ), false));
 }
 
 // ---------------------------------------------------------------------------
@@ -460,12 +845,16 @@ function summarize(ast) {
     case 'select': summary = summarizeSelect(ast); break;
     case 'truncate': {
       const name = Array.isArray(ast.name) ? tableLabels(ast.name) : '（不明なテーブル）';
-      summary = summarizeSimple('TRUNCATE', `${name}の全行を即座に削除します（多くの環境で取り消せません）`);
+      summary = summarizeSimple('TRUNCATE', [
+        `${name} の`,
+        { text: '全行', strong: true },
+        'を即座に削除します（多くの環境で取り消せません）',
+      ]);
       break;
     }
     case 'drop': {
       const name = Array.isArray(ast.name) ? tableLabels(ast.name) : '（不明な対象）';
-      summary = summarizeSimple('DROP', `${name}を定義ごと削除します`);
+      summary = summarizeSimple('DROP', [`${name} を定義ごと削除します`]);
       break;
     }
     default:
@@ -512,6 +901,10 @@ globalThis.SQLMeganeSummarizer = {
     joinBlocks,
     valueText,
     tableLabel,
+    toRenyo,
+    inlinableCondition,
+    joinGist,
+    whereGist,
   },
 };
 
