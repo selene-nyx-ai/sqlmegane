@@ -373,6 +373,25 @@ const DDL_KINDS = new Set(['CREATE', 'ALTER', 'TRUNCATE_TABLE', 'DROP_TABLE', 'D
 const DML_KINDS = new Set(['INSERT', 'UPDATE', 'DELETE']);
 
 // ---------------------------------------------------------------------------
+// 解析不能文の沈黙素通り対策（P1）
+// ---------------------------------------------------------------------------
+//
+// ASTパースにも正規表現にも引っかからず kind=OTHER・findings=[] のまま
+// 「警告なし」に見えてしまう文（MERGE / EXEC / CALL など）を検出したら、
+// 必ず1つは警告を出す。「レビューしたのに何も言わなかった」を防ぐのが目的。
+
+const UNANALYZED_STATEMENT_TITLE = '⚠ この文は解析できませんでした（チェック未実施）';
+const UNANALYZED_STATEMENT_MESSAGE = 'この文は解析できませんでした。チェックは行われていません。MERGE等の未対応構文が含まれます。目視での確認が必要です。';
+
+// kindがOTHERになる文のうち、破壊的な操作につながりうるキーワードを含む場合に
+// 警告を出す対象にする（MERGEは専用kindで判定するためここでは主にEXEC系）。
+const UNANALYZED_DESTRUCTIVE_KEYWORDS = ['MERGE', 'EXEC', 'EXECUTE', 'SP_EXECUTESQL', 'CALL'];
+
+function hasUnanalyzedDestructiveKeyword(masked) {
+  return topLevelSearch(masked, UNANALYZED_DESTRUCTIVE_KEYWORDS, 0) !== null;
+}
+
+// ---------------------------------------------------------------------------
 // WHERE 句の抽出
 // ---------------------------------------------------------------------------
 
@@ -556,6 +575,19 @@ function findQuotedNumericComparisons(plainClause) {
     results.push({ column: m[1], op: m[2], value: m[3] });
   }
   return results;
+}
+
+/**
+ * implicit-conversion のメッセージを組み立てる。P2: ノイズ疲れ対策として、
+ * 同一文内に複数箇所あっても1つのfindingに集約する（例: `dept_cd = '10' など3箇所`）。
+ * ゼロ埋めコードのような文字コード列への文字列比較は日本の業務DBでは正しい書き方
+ * であることが多いため、その旨も明示して過剰な警戒を避ける。
+ */
+function buildImplicitConversionMessage(list) {
+  const first = list[0];
+  const example = `\`${first.column}\` ${first.op} '${first.value}'`;
+  const label = list.length > 1 ? `${example} など${list.length}箇所` : example;
+  return `数値に見える値が文字列リテラルとして比較されています（${label}）。方言によっては暗黙的な型変換が行われ、インデックスが使われなくなったり、意図しない一致・不一致が起きることがあります。文字コード列（ゼロ埋めコードなど）への文字列比較はそれ自体正しい書き方です。数値列との比較の場合のみ、列の型を確認してください。`;
 }
 
 // ---------------------------------------------------------------------------
@@ -783,6 +815,31 @@ function updateHasJoin(masked) {
   return /\bJOIN\b/i.test(head);
 }
 
+/**
+ * `UPDATE (SELECT ... [WHERE ...]) ... SET ...` 形式（Oracleの更新可能結合ビュー）
+ * かどうかを判定する。"UPDATE (" の直後が SELECT の場合のみインラインビューと
+ * 認識する（単純な `UPDATE (col1, col2) = (...)` のような他構文との誤認を避けるため）。
+ *
+ * hasOwnWhere は、そのインラインビュー自身が（外側のUPDATE文とは別に）自分の
+ * WHERE句を持っているかどうか。Oracleの更新可能結合ビューでは、行の絞り込みは
+ * 外側のUPDATEのWHERE句ではなく、このインラインビュー側のWHERE句で行われるのが
+ * 典型的なパターンのため、外側にWHEREが無くてもこれだけで「全行対象」と決めつけると
+ * 誤検知（false danger）になる。
+ */
+function detectInlineViewUpdate(masked) {
+  const bodyStart = findCteBodyStart(masked);
+  const s = masked.slice(bodyStart).replace(/^\s+/, '');
+  const m = s.match(/^UPDATE\s*\(/i);
+  if (!m) return { isInlineView: false, hasOwnWhere: false };
+  const openIdx = m[0].length - 1;
+  const closeIdx = extractParenGroupEnd(s, openIdx);
+  if (closeIdx === -1) return { isInlineView: false, hasOwnWhere: false };
+  const inner = s.slice(openIdx + 1, closeIdx);
+  if (!/^\s*SELECT\b/i.test(inner)) return { isInlineView: false, hasOwnWhere: false };
+  const hasOwnWhere = topLevelSearch(inner, ['WHERE'], 0) !== null;
+  return { isInlineView: true, hasOwnWhere };
+}
+
 /** MySQLのマルチテーブルUPDATE（`UPDATE t1, t2 SET ...` / `UPDATE t1 JOIN t2 ... SET ...`）かどうか。
  *  MySQLではこの形のUPDATEにLIMITを付けられないため、mysql-no-limitの対象から除外する。 */
 function isMysqlMultiTableUpdate(masked) {
@@ -831,6 +888,57 @@ function isSingleEqualityWhere(maskedClause) {
 }
 
 // ---------------------------------------------------------------------------
+// PL/SQL・T-SQL 無名ブロックの検出（P1: 分解事故対策）
+// ---------------------------------------------------------------------------
+//
+// `BEGIN ... END; / ` のようなPL/SQLの無名ブロック（DECLARE や
+// CREATE OR REPLACE ... で始まるプロシージャ/ファンクション定義を含む）を
+// 通常のセミコロン分割にかけると、ブロック内の `UPDATE ... WHERE ...;` が
+// 独立した1文として切り出されるのではなく、ブロック全体が「BEGIN」で始まる
+// 1文として getStatementKind() に渡り、kind=BEGIN_TX（トランザクション開始）に
+// 誤判定されてしまう。その結果、ブロック内のUPDATEのWHERE漏れ等が一切
+// チェックされないまま無警告で素通りする（実際に発生が確認された事故）。
+//
+// 対策として、入力テキストの先頭が BEGIN / DECLARE / CREATE OR REPLACE で
+// 始まり、かつ END; の後に「行頭が / だけの行」（SQL*Plus的なブロック終端）が
+// 続く場合は、その範囲をセミコロン分割の対象から外し、ブロック全体を1文として
+// 扱う（中身は解析せず、必ず警告を出す）。
+//
+// 検知ヒューリスティックは意図的に保守的にしてある。「/ 終端行」が無い限り
+// ブロックとは認識しないため、通常の `BEGIN TRAN ... COMMIT` のようなT-SQLの
+// 複数文スクリプトを誤ってブロック扱いにすることは無い（＝誤ってブロック扱いに
+// するより、分割してしまう既存挙動が残る方がまし、という判断）。
+
+const PLSQL_BLOCK_START_RE = /^(BEGIN|DECLARE|CREATE\s+OR\s+REPLACE)\b/i;
+// 行頭（前後に空白のみ許容）が "/" だけの行。SQL*Plus / SQLcl のブロック終端。
+const PLSQL_SLASH_LINE_RE = /^[ \t]*\/[ \t]*\r?$/gm;
+
+/**
+ * text の先頭からPL/SQL無名ブロックを検出し、その範囲 { start, end } を返す。
+ * 見つからなければ null。
+ *  - start: ブロック本体の開始オフセット（先頭の空白を除く）
+ *  - end:   "/" 終端行の直後のオフセット（このオフセット以降が次の文の探索対象）
+ *
+ * "END ... ;" が "/" 終端行より前に存在することを条件にすることで、
+ * ブロックに無関係な "/" （たとえばコメント中や別の文脈）に反応しないようにする。
+ */
+function detectPlsqlBlockRange(text) {
+  const leadingWsLen = text.length - text.replace(/^\s+/, '').length;
+  const trimmedStart = text.slice(leadingWsLen);
+  if (!PLSQL_BLOCK_START_RE.test(trimmedStart)) return null;
+
+  PLSQL_SLASH_LINE_RE.lastIndex = 0;
+  let m;
+  while ((m = PLSQL_SLASH_LINE_RE.exec(text))) {
+    const before = text.slice(0, m.index);
+    if (/\bEND\s*;/i.test(before)) {
+      return { start: leadingWsLen, end: m.index + m[0].length };
+    }
+  }
+  return null;
+}
+
+// ---------------------------------------------------------------------------
 // 文単位の解析
 // ---------------------------------------------------------------------------
 
@@ -848,8 +956,30 @@ const AST_TYPE_TO_KIND = { update: 'UPDATE', delete: 'DELETE' };
  *  3. パース失敗・方言非対応 → 従来の正規表現ヒューリスティック。
  *     失敗の場合はエラー位置を parse.error に入れてUIで明示できるようにする。
  */
-function analyzeStatement(rawStmt, dialect) {
+function analyzeStatement(rawStmt, dialect, opts) {
   const { plain, masked } = scan(rawStmt, dialect);
+
+  if (opts && opts.isPlsqlBlock) {
+    // PL/SQL/T-SQLの無名ブロック全体。中身は分解・解析せず、必ず警告を出す
+    // （P1: 分解事故対策。詳細は detectPlsqlBlockRange のコメント参照）。
+    return {
+      kind: 'PLSQL_BLOCK',
+      findings: [mk(
+        'warning',
+        'unanalyzed-statement',
+        '⚠ PL/SQL無名ブロックは解析対象外です',
+        'BEGIN 〜 END; の無名ブロック（PL/SQL、または類似のT-SQLブロック）と判定しました。中のDML（UPDATE/DELETE等）は個別のセミコロン分割や危険パターンチェックを行っていません。ブロック内の1文ずつを目視で確認してください。'
+      )],
+      verifySelect: null,
+      verifySelectHasJoin: false,
+      masked,
+      plain,
+      summary: null,
+      parse: { mode: 'plsql-block', error: null, parserDialect: null, usedFallbackDialect: null, primaryError: null },
+      ast: null,
+    };
+  }
+
   const kind = getStatementKind(masked);
   const whereInfo = findWhereClause(masked, plain);
 
@@ -916,15 +1046,30 @@ function analyzeStatementByRegex(rawStmt, dialect, ctx) {
   const findings = [];
 
   if (kind === 'UPDATE' && !whereInfo) {
-    const joinUpdate = updateHasJoin(masked);
-    findings.push(mk(
-      'danger',
-      'no-where-update',
-      'WHERE句のないUPDATE',
-      joinUpdate
-        ? 'WHERE句が見つかりません。このままではJOINで一致した行がすべて更新されます（範囲を必ず確認してください）。想定通りであっても、WHERE句を明示するか、下記の検算SELECTで対象件数を確認してから実行することを強く推奨します。'
-        : 'WHERE句が見つかりません。このままではテーブルの全行が更新されます。想定通りであっても、WHERE句を明示するか、下記の検算SELECTで対象件数を確認してから実行することを強く推奨します。'
-    ));
+    const inlineView = detectInlineViewUpdate(masked);
+    if (inlineView.isInlineView && inlineView.hasOwnWhere) {
+      // Oracleの更新可能結合ビュー（UPDATE (SELECT ... WHERE ...) SET ...）。
+      // 外側にWHERE句は無いが、インラインビュー自身のWHERE句が行を絞り込んでいる
+      // ため「全行が更新される」とは言い切れない。かといって、そのWHERE句の
+      // 絞り込みが十分か（key-preservedかどうか等）を正規表現で正しく判定するのは
+      // 難しいため、danger誤爆を出すよりは「対象外」であることを明示する。
+      findings.push(mk(
+        'warning',
+        'unanalyzed-statement',
+        '⚠ インラインビューを含むUPDATEは簡易チェックの対象外です',
+        'UPDATE (SELECT ... ) 形式（Oracleの更新可能結合ビュー）のUPDATEです。行の絞り込みはインラインビュー側のWHERE句で行われているため、このツールのWHERE句有無による危険判定（全行更新の警告）は行っていません。更新対象の行が意図通りに絞り込まれているか、対象テーブルがkey-preservedであるかを含め、目視で確認してください。'
+      ));
+    } else {
+      const joinUpdate = updateHasJoin(masked);
+      findings.push(mk(
+        'danger',
+        'no-where-update',
+        'WHERE句のないUPDATE',
+        joinUpdate
+          ? 'WHERE句が見つかりません。このままではJOINで一致した行がすべて更新されます（範囲を必ず確認してください）。想定通りであっても、WHERE句を明示するか、下記の検算SELECTで対象件数を確認してから実行することを強く推奨します。'
+          : 'WHERE句が見つかりません。このままではテーブルの全行が更新されます。想定通りであっても、WHERE句を明示するか、下記の検算SELECTで対象件数を確認してから実行することを強く推奨します。'
+      ));
+    }
   }
   if (kind === 'DELETE' && !whereInfo) {
     findings.push(mk(
@@ -965,12 +1110,11 @@ function analyzeStatementByRegex(rawStmt, dialect, ctx) {
 
     const quotedNumeric = findQuotedNumericComparisons(whereInfo.plainClause);
     if (quotedNumeric.length > 0) {
-      const examples = quotedNumeric.slice(0, 3).map((q) => `${q.column} ${q.op} '${q.value}'`).join(' / ');
       findings.push(mk(
-        'warning',
+        'info',
         'implicit-conversion',
-        '引用符付き数値リテラルによる暗黙型変換の疑い',
-        `数値に見える値が文字列リテラルとして比較されています（例: ${examples}）。方言によっては暗黙的な型変換が行われ、インデックスが使われなくなったり、意図しない一致・不一致が起きることがあります。列の型を確認し、数値型であれば引用符なしでの比較を検討してください。`
+        '引用符付き数値リテラルとの比較',
+        buildImplicitConversionMessage(quotedNumeric)
       ));
     }
 
@@ -1026,6 +1170,29 @@ function analyzeStatementByRegex(rawStmt, dialect, ctx) {
       'drop-database',
       'DROP DATABASE',
       'DROP DATABASEはデータベース全体を削除します。影響範囲が最も大きい操作の一つです。本当に実行が必要か、対象環境が本番でないか、複数人での確認を強く推奨します。'
+    ));
+  }
+
+  if (kind === 'MERGE') {
+    // MERGEは専用の構文解析・検出ルールを持たない。何も言わずに通すと「レビュー
+    // したのに何も指摘がなかった＝安全」と誤解されるのが最悪のため、findingsが
+    // 空でも必ず警告を出す（P1: 解析不能文の沈黙素通り対策）。
+    findings.push(mk(
+      'warning',
+      'unanalyzed-statement',
+      UNANALYZED_STATEMENT_TITLE,
+      `${UNANALYZED_STATEMENT_MESSAGE} MERGE文の解析は未対応です。`
+    ));
+  } else if (kind === 'OTHER' && findings.length === 0 && hasUnanalyzedDestructiveKeyword(masked)) {
+    // kindがOTHER（＝正規表現でも文種別を特定できなかった）で、かつ破壊的な
+    // 操作を伴いうるキーワード（EXEC/CALL等のプロシージャ実行など）を含む場合も
+    // 同様に沈黙素通りを防ぐ。findings.length===0のチェックは、将来OTHER種別に
+    // 他のルールが追加されたときに警告が二重・矛盾しないようにするための保険。
+    findings.push(mk(
+      'warning',
+      'unanalyzed-statement',
+      UNANALYZED_STATEMENT_TITLE,
+      UNANALYZED_STATEMENT_MESSAGE
     ));
   }
 
@@ -1093,6 +1260,7 @@ function buildOverview(statements) {
   const tables = [];
   const warnedStatements = [];
   const fallbackStatements = [];
+  const unanalyzedStatements = [];
 
   for (const s of statements) {
     counts[s.kind] = (counts[s.kind] || 0) + 1;
@@ -1103,6 +1271,12 @@ function buildOverview(statements) {
       warnedStatements.push(s.number);
     }
     if (s.parse && s.parse.mode === 'fallback') fallbackStatements.push(s.number);
+    // 解析不能文（MERGE / PL/SQLブロック / インラインビューUPDATE / EXEC等）は
+    // unanalyzed-statement findingが付く。スクリプト全体サマリで「未解析の文」件数
+    // として一覧できるようにする（P1: 沈黙素通り対策の一部）。
+    if (s.findings.some((f) => f.code === 'unanalyzed-statement')) {
+      unanalyzedStatements.push(s.number);
+    }
   }
 
   const destructive = statements.filter((s) => DESTRUCTIVE_KINDS.has(s.kind)).length;
@@ -1114,6 +1288,7 @@ function buildOverview(statements) {
     tables,
     warnedStatements,
     fallbackStatements,
+    unanalyzedStatements,
   };
 }
 
@@ -1121,20 +1296,42 @@ function buildOverview(statements) {
 // 全体解析（複数文 + トランザクション文脈 + 方言別ルール + 全体まとめ）
 // ---------------------------------------------------------------------------
 
+/**
+ * splitStatementsWithOffsets() の前段として、先頭がPL/SQL無名ブロックかどうかを
+ * 判定する。ブロックが見つかった場合は、ブロック本体を1文として先頭に置き、
+ * 残りのテキストだけを通常通りセミコロン分割する（ブロックの中身は分割しない）。
+ * オフセットはすべて元テキスト基準に補正するので、行番号表示は従来通り機能する。
+ */
+function buildRawStatements(text, dialect) {
+  const blockRange = detectPlsqlBlockRange(text);
+  if (!blockRange) return splitStatementsWithOffsets(text, dialect).map((s) => ({ ...s, isPlsqlBlock: false }));
+
+  const blockRaw = text.slice(blockRange.start, blockRange.end).trim();
+  const rest = text.slice(blockRange.end);
+  const restStatements = splitStatementsWithOffsets(rest, dialect).map((s) => ({
+    raw: s.raw,
+    start: s.start + blockRange.end,
+    isPlsqlBlock: false,
+  }));
+  return [{ raw: blockRaw, start: blockRange.start, isPlsqlBlock: true }, ...restStatements];
+}
+
 function analyzeSQL(fullText, dialect) {
   const d = dialect || 'generic';
   const text = fullText || '';
-  const rawStatements = splitStatementsWithOffsets(text, d);
+  const rawStatements = buildRawStatements(text, d);
+  const isSingleStatementPaste = rawStatements.length === 1;
   const statements = [];
   let txOpen = false;
   let sawDmlInBatch = false;
   let destructiveCount = 0;
   let firstBeginTranIdx = -1;
   let firstDestructiveIdx = -1;
+  const noTransactionStatementNumbers = [];
 
   rawStatements.forEach((entry, idx) => {
     const raw = entry.raw;
-    const result = analyzeStatement(raw, d);
+    const result = analyzeStatement(raw, d, { isPlsqlBlock: entry.isPlsqlBlock });
     const { kind, findings } = result;
 
     if (kind === 'BEGIN_TX') {
@@ -1148,12 +1345,20 @@ function analyzeSQL(fullText, dialect) {
       if (firstDestructiveIdx === -1) firstDestructiveIdx = idx;
       destructiveCount++;
       if (!txOpen) {
-        findings.push(mk(
-          'info',
-          'no-transaction',
-          'トランザクションに包まれていません',
-          'この破壊的操作の前にBEGIN（トランザクション開始）が見当たりません。明示的にトランザクションを開始しておくと、結果を確認してからCOMMIT、想定外であればROLLBACKする運用がしやすくなります。'
-        ));
+        if (isSingleStatementPaste) {
+          // 単文貼り付け時は従来通り、その文自身にfindingを付ける。
+          findings.push(mk(
+            'info',
+            'no-transaction',
+            'トランザクションに包まれていません',
+            'この破壊的操作の前にBEGIN（トランザクション開始）が見当たりません。明示的にトランザクションを開始しておくと、結果を確認してからCOMMIT、想定外であればROLLBACKする運用がしやすくなります。'
+          ));
+        } else {
+          // 複数文貼り付け時は文ごとに繰り返し出さず、バッチ全体で1回（globalFindings）
+          // に集約する（P2: ノイズ疲れ対策）。対象文の番号だけ集めておき、
+          // ループの後でまとめて1件のfindingにする。
+          noTransactionStatementNumbers.push(idx + 1);
+        }
       }
     }
 
@@ -1210,6 +1415,15 @@ function analyzeSQL(fullText, dialect) {
   });
 
   const globalFindings = [];
+  if (noTransactionStatementNumbers.length > 0) {
+    const nums = noTransactionStatementNumbers.map((n) => `#${n}`).join(', ');
+    globalFindings.push(mk(
+      'info',
+      'no-transaction',
+      'トランザクションに包まれていない破壊的操作があります',
+      `明示的なBEGIN（トランザクション開始）に包まれていない破壊的操作（UPDATE/DELETE/TRUNCATE/DROPなど）が${noTransactionStatementNumbers.length}件あります（${nums}）。結果を確認してからCOMMIT、想定外であればROLLBACKできるよう、明示的にトランザクションを開始しておくことを検討してください。`
+    ));
+  }
   if (destructiveCount >= 2) {
     globalFindings.push(mk(
       'info',

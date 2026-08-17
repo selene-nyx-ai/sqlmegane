@@ -322,6 +322,18 @@ body {
   overflow: hidden;
 }
 
+/* 解析できなかった文（MERGE・PL/SQLブロック・インラインビューUPDATE等）は
+   findingsが少なく「安全に見える」ことがあるため、カード自体を危険色系の
+   縁取りにして、他の通常カードより明らかに目立つようにする。 */
+.stmt-card-unanalyzed {
+  border-color: var(--danger-border);
+  box-shadow: 0 0 0 1px var(--danger-border);
+}
+
+.stmt-card-unanalyzed .stmt-card-head {
+  background: var(--danger-bg);
+}
+
 .stmt-card-head {
   display: flex;
   align-items: center;

@@ -134,6 +134,20 @@ function findQuotedNumericComparisons(expr) {
   return results;
 }
 
+/**
+ * implicit-conversion のメッセージを組み立てる。P2: ノイズ疲れ対策として、
+ * 同一文内に複数箇所あっても1つのfindingに集約する（例: `dept_cd` = '10' など3箇所）。
+ * ゼロ埋めコードのような文字コード列への文字列比較は日本の業務DBでは正しい書き方
+ * であることが多いため、その旨も明示して過剰な警戒を避ける（正規表現版
+ * analyzer.js の buildImplicitConversionMessage と同内容）。
+ */
+function buildImplicitConversionMessage(list) {
+  const first = list[0];
+  const example = `${q(first.column)} ${first.op} '${first.value}'`;
+  const label = list.length > 1 ? `${example} など${list.length}箇所` : example;
+  return `数値に見える値が文字列リテラルとして比較されています（${label}）。方言によっては暗黙的な型変換が行われ、インデックスが使われなくなったり、意図しない一致・不一致が起きることがあります。文字コード列（ゼロ埋めコードなど）への文字列比較はそれ自体正しい書き方です。数値列との比較の場合のみ、列の型を確認してください。`;
+}
+
 // ---------------------------------------------------------------------------
 // 自己参照サブクエリで絞り込み条件なし
 // ---------------------------------------------------------------------------
@@ -334,12 +348,11 @@ function analyzeAst(ast, kind, dialect) {
 
     const quotedNumeric = findQuotedNumericComparisons(ast.where);
     if (quotedNumeric.length > 0) {
-      const examples = quotedNumeric.slice(0, 3).map((x) => `${x.column} ${x.op} '${x.value}'`).join(' / ');
       findings.push(mk(
-        'warning',
+        'info',
         'implicit-conversion',
-        '引用符付き数値リテラルによる暗黙型変換の疑い',
-        `数値に見える値が文字列リテラルとして比較されています（例: ${examples}）。方言によっては暗黙的な型変換が行われ、インデックスが使われなくなったり、意図しない一致・不一致が起きることがあります。列の型を確認し、数値型であれば引用符なしでの比較を検討してください。`
+        '引用符付き数値リテラルとの比較',
+        buildImplicitConversionMessage(quotedNumeric)
       ));
     }
 

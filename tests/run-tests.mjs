@@ -1448,6 +1448,181 @@ test('minor4: LEFT JOINの通常ケースでは引き続き「LEFT JOIN した�
 });
 
 // ---------------------------------------------------------------------------
+// ペルソナテスト指摘の修正（P1: 解析不能文の沈黙素通り対策）
+// ---------------------------------------------------------------------------
+
+test('P1-1: MERGE文はfindingsが空にならず、unanalyzed-statement警告が必ず付く', () => {
+  const s = firstStatement('MERGE INTO tgt t USING src s ON (t.id = s.id) WHEN MATCHED THEN UPDATE SET t.val = s.val;', 'oracle');
+  assert.equal(s.kind, 'MERGE');
+  assert.ok(s.findings.length > 0, 'findingsが空のまま（沈黙素通り）です');
+  const f = findCode(s.findings, 'unanalyzed-statement');
+  assert.ok(f);
+  assert.equal(f.severity, 'warning');
+  assert.match(f.message, /MERGE文の解析は未対応/);
+});
+
+test('P1-1: kind=OTHERで破壊的キーワード（EXEC）を含む文はunanalyzed-statement警告が付く', () => {
+  const s = firstStatement('EXEC sp_do_something @id = 1;', 'mssql');
+  assert.equal(s.kind, 'OTHER');
+  const f = findCode(s.findings, 'unanalyzed-statement');
+  assert.ok(f, 'EXEC文が沈黙で素通りしています');
+  assert.equal(f.severity, 'warning');
+});
+
+test('P1-1: kind=OTHERでも破壊的キーワードを含まない文にはunanalyzed-statement警告を出さない（過剰検出しない）', () => {
+  const s = firstStatement('SHOW TABLES;', 'mysql');
+  assert.equal(s.kind, 'OTHER');
+  assert.ok(!hasCode(s.findings, 'unanalyzed-statement'));
+});
+
+// ---------------------------------------------------------------------------
+// P1-2: Oracle更新可能結合ビュー（インラインビューUPDATE）の誤検知修正
+// ---------------------------------------------------------------------------
+
+test('P1-2: インラインビューUPDATEで外側WHEREが無くても、インラインビュー自身にWHEREがあればno-where-updateを誤爆しない', () => {
+  const s = firstStatement('UPDATE (SELECT a, b FROM t WHERE x = 1) v SET a = 10;', 'oracle');
+  assert.ok(!hasCode(s.findings, 'no-where-update'), 'インラインビューのWHEREを無視してdanger誤爆しています');
+  const f = findCode(s.findings, 'unanalyzed-statement');
+  assert.ok(f, 'インラインビューUPDATEは対象外である旨の警告が必要です');
+  assert.equal(f.severity, 'warning');
+  assert.match(f.message, /インラインビュー|更新可能結合ビュー/);
+});
+
+test('P1-2: インラインビューUPDATEでも外側にWHEREがあれば通常のUPDATEとして扱う（回帰確認）', () => {
+  const s = firstStatement('UPDATE (SELECT a, b FROM t WHERE x = 1) v SET a = 10 WHERE b = 2;', 'oracle');
+  assert.ok(!hasCode(s.findings, 'no-where-update'));
+  assert.ok(!hasCode(s.findings, 'unanalyzed-statement'), '外側にWHEREがある通常ケースまでunanalyzed扱いにしないこと');
+});
+
+test('P1-2: インラインビューUPDATEで内外どちらにもWHEREが無ければ、従来通りno-where-update dangerを出す', () => {
+  const s = firstStatement('UPDATE (SELECT a, b FROM t) v SET a = 10;', 'oracle');
+  const f = findCode(s.findings, 'no-where-update');
+  assert.ok(f, '本当に絞り込みが無いケースまでunanalyzedに倒して危険を隠さないこと');
+  assert.equal(f.severity, 'danger');
+});
+
+// ---------------------------------------------------------------------------
+// P1-3: PL/SQL/T-SQL無名ブロックの分解事故修正
+// ---------------------------------------------------------------------------
+
+test('P1-3: BEGIN〜END;/ の無名ブロックはセミコロン分割されず1文として扱われる', () => {
+  const sql = 'BEGIN\n  UPDATE emp SET sal = sal * 1.1;\n  COMMIT;\nEND;\n/';
+  const result = analyzeSQL(sql, 'oracle');
+  assert.equal(result.statements.length, 1, 'ブロックが複数文に分割されてしまっています');
+  assert.equal(result.statements[0].kind, 'PLSQL_BLOCK');
+});
+
+test('P1-3: PL/SQLブロック内のWHERE漏れUPDATEが、ブロックとして無警告で素通りしない（分解事故の再現ケース）', () => {
+  const sql = 'BEGIN\n  UPDATE emp SET sal = sal * 1.1;\n  COMMIT;\nEND;\n/';
+  const s = firstStatement(sql, 'oracle');
+  // 修正前は kind=BEGIN_TX に誤判定され、中のUPDATEのWHERE漏れは一切チェックされず
+  // findingsが空のまま静かに通っていた。修正後は「解析対象外」の警告が必ず付く。
+  assert.ok(s.findings.length > 0);
+  assert.ok(hasCode(s.findings, 'unanalyzed-statement'));
+  assert.match(findCode(s.findings, 'unanalyzed-statement').message, /PL\/SQL|無名ブロック/);
+});
+
+test('P1-3: DECLARE で始まるPL/SQLブロックも同様に1文として扱われる', () => {
+  const sql = 'DECLARE\n  v_count NUMBER;\nBEGIN\n  DELETE FROM emp;\nEND;\n/';
+  const result = analyzeSQL(sql, 'oracle');
+  assert.equal(result.statements.length, 1);
+  assert.equal(result.statements[0].kind, 'PLSQL_BLOCK');
+});
+
+test('P1-3: 通常のBEGIN TRAN 〜 COMMIT（T-SQLの複数文スクリプト）はブロック扱いにせず、従来通り分割される（誤検知しない）', () => {
+  const sql = 'BEGIN TRAN\nUPDATE a SET x = 1 WHERE id = 1;\nCOMMIT\n';
+  const result = analyzeSQL(sql, 'mssql');
+  assert.ok(result.statements.length >= 2, 'BEGIN TRANスクリプトを誤ってPL/SQLブロック扱いにしています');
+  assert.ok(result.statements.every((s) => s.kind !== 'PLSQL_BLOCK'));
+});
+
+// ---------------------------------------------------------------------------
+// P2-4: implicit-conversion のノイズ疲れ対策（info格下げ・集約）
+// ---------------------------------------------------------------------------
+
+test('P2-4: implicit-conversionはseverityがinfoに格下げされている', () => {
+  const s = firstStatement("UPDATE t SET x=1 WHERE id = '123';", 'mysql');
+  const f = findCode(s.findings, 'implicit-conversion');
+  assert.ok(f);
+  assert.equal(f.severity, 'info');
+});
+
+test('P2-4: 同一文内に複数箇所あっても1つのfindingに集約され、件数が明示される', () => {
+  const s = firstStatement("UPDATE t SET x=1 WHERE dept_cd = '10' AND cost_cd = '20' AND flag_cd = '30';", 'mysql');
+  const matches = s.findings.filter((f) => f.code === 'implicit-conversion');
+  assert.equal(matches.length, 1, '複数のfindingに分かれてしまっています');
+  assert.match(matches[0].message, /3箇所/);
+});
+
+test('P2-4: メッセージに文字コード列（ゼロ埋めコード等）への言及が含まれる', () => {
+  const s = firstStatement("UPDATE t SET x=1 WHERE id = '123';", 'mysql');
+  const f = findCode(s.findings, 'implicit-conversion');
+  assert.match(f.message, /文字コード列/);
+  assert.match(f.message, /ゼロ埋め/);
+});
+
+test('P2-4: AST版（PostgreSQL）でもseverityがinfoに格下げ・集約される', () => {
+  const s = firstStatement("UPDATE t SET x=1 WHERE dept_cd = '10' AND cost_cd = '20';", 'postgres');
+  const matches = s.findings.filter((f) => f.code === 'implicit-conversion');
+  assert.equal(matches.length, 1);
+  assert.equal(matches[0].severity, 'info');
+  assert.match(matches[0].message, /2箇所/);
+});
+
+// ---------------------------------------------------------------------------
+// P2-5: no-transaction のノイズ疲れ対策（複数文貼り付け時の集約）
+// ---------------------------------------------------------------------------
+
+test('P2-5: 複数文貼り付け時、no-transactionは文ごとに出さずglobalFindingsに1回だけ集約される', () => {
+  const sql = 'UPDATE a SET x=1 WHERE id=1;\nDELETE FROM b WHERE id=2;\nUPDATE c SET y=2 WHERE id=3;';
+  const result = analyzeSQL(sql, 'generic');
+  for (const s of result.statements) {
+    assert.ok(!hasCode(s.findings, 'no-transaction'), `文${s.number}に個別のno-transactionが残っています`);
+  }
+  const g = result.globalFindings.find((f) => f.code === 'no-transaction');
+  assert.ok(g, 'globalFindingsに集約されたno-transactionがありません');
+  assert.equal(g.severity, 'info');
+  assert.match(g.message, /3件/);
+  assert.match(g.message, /#1/);
+  assert.match(g.message, /#2/);
+  assert.match(g.message, /#3/);
+});
+
+test('P2-5: 単文貼り付け時はno-transactionが従来通りその文自身に付く（回帰確認）', () => {
+  const result = analyzeSQL('DELETE FROM orders WHERE id = 1;', 'generic');
+  assert.equal(result.statements.length, 1);
+  assert.ok(hasCode(result.statements[0].findings, 'no-transaction'));
+  assert.ok(!result.globalFindings.some((f) => f.code === 'no-transaction'));
+});
+
+test('P2-5: 複数文でもBEGIN〜COMMITで保護されている文は集約対象に含まれない', () => {
+  const sql = 'BEGIN;\nDELETE FROM orders WHERE id = 1;\nCOMMIT;\nDELETE FROM logs WHERE id = 2;';
+  const result = analyzeSQL(sql, 'generic');
+  const g = result.globalFindings.find((f) => f.code === 'no-transaction');
+  assert.ok(g);
+  assert.match(g.message, /1件/);
+  assert.match(g.message, /#4/);
+  assert.ok(!/#2/.test(g.message));
+});
+
+// ---------------------------------------------------------------------------
+// スクリプトモード: 未解析の文の一覧（overview.unanalyzedStatements）
+// ---------------------------------------------------------------------------
+
+test('overview.unanalyzedStatementsにMERGE文・PL/SQLブロックの番号が列挙される', () => {
+  const sql = [
+    'UPDATE a SET x = 1 WHERE id = 1;',
+    'DELETE FROM b WHERE id = 2;',
+    'MERGE INTO c cc USING d dd ON (cc.id = dd.id) WHEN MATCHED THEN UPDATE SET cc.v = dd.v;',
+    'INSERT INTO e (a) VALUES (1);',
+    'SELECT * FROM f;',
+  ].join('\n');
+  const result = analyzeSQL(sql, 'oracle');
+  assert.ok(result.overview, 'overviewがありません');
+  assert.deepEqual(result.overview.unanalyzedStatements, [3]);
+});
+
+// ---------------------------------------------------------------------------
 // 結果表示
 // ---------------------------------------------------------------------------
 

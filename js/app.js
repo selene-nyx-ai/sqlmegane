@@ -32,6 +32,7 @@ const KIND_LABELS = {
   ALTER: 'ALTER',
   BEGIN_TX: 'BEGIN / トランザクション開始',
   END_TX: 'COMMIT / ROLLBACK',
+  PLSQL_BLOCK: 'PL/SQL無名ブロック（未解析）',
   OTHER: 'その他',
 };
 
@@ -253,8 +254,18 @@ function renderParserSwapNotice(parse, dialect) {
   return note;
 }
 
+/**
+ * 解析できなかった文（MERGE / PL/SQLブロック / インラインビューUPDATE等）は
+ * findings が空・要約なしでも「警告なし」に見えないよう、カード自体を危険色系の
+ * 縁取りにする（P1: 沈黙素通り対策。「安全に見える」のを防ぐのが目的）。
+ */
+function isUnanalyzedStatement(stmt) {
+  return stmt.findings.some((f) => f.code === 'unanalyzed-statement');
+}
+
 function renderStatementCard(stmt, dialect) {
-  const card = el('div', { className: 'stmt-card', attrs: { id: `stmt-${stmt.number}` } });
+  const cardClass = isUnanalyzedStatement(stmt) ? 'stmt-card stmt-card-unanalyzed' : 'stmt-card';
+  const card = el('div', { className: cardClass, attrs: { id: `stmt-${stmt.number}` } });
 
   const headRow = el('div', { className: 'stmt-card-head' });
   const title = el('div', { className: 'stmt-title' });
@@ -378,6 +389,18 @@ function renderOverview(overview) {
       className: 'overview-line',
       text: `構文解析できず簡易チェックになった文: ${overview.fallbackStatements.map((n) => `#${n}`).join(', ')}`,
     }));
+  }
+
+  if (overview.unanalyzedStatements.length > 0) {
+    const line = el('p', { className: 'overview-line overview-warned' });
+    line.appendChild(document.createTextNode(`⚠ 未解析の文: ${overview.unanalyzedStatements.length}件（`));
+    overview.unanalyzedStatements.forEach((num, i) => {
+      if (i > 0) line.appendChild(document.createTextNode(', '));
+      const a = el('a', { className: 'overview-link', text: `#${num}`, attrs: { href: `#stmt-${num}` } });
+      line.appendChild(a);
+    });
+    line.appendChild(document.createTextNode('）。MERGE等の未対応構文・PL/SQLブロックなどは、チェックが行われていません。目視で確認してください。'));
+    card.appendChild(line);
   }
 
   return card;
