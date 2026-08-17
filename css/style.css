@@ -309,6 +309,79 @@ body {
   text-align: center;
 }
 
+/* ---------- 判定バナー（結果エリア先頭。スクロールせず見えることが必須） ---------- */
+/* プロダクトオーナー指摘: 「スクロールしないと全部見きれないから、冒頭に
+   注意や危険などの確認事項が何件あるかを出すべき」。文が1件でもfindingsが
+   0件でも常に表示し、危険>注意>情報の優先順で3段階の色分けをする。 */
+
+.verdict-banner {
+  padding: 14px 16px;
+  border-radius: var(--radius);
+  border: 1px solid;
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+
+.verdict-headline {
+  margin: 0;
+  font-size: 1.02rem;
+  font-weight: 700;
+  line-height: 1.5;
+}
+
+.verdict-subtext {
+  margin: 0;
+  font-size: 0.85rem;
+  line-height: 1.7;
+  color: var(--text-muted);
+}
+
+.verdict-subtext-strong {
+  color: inherit;
+  font-weight: 700;
+}
+
+.verdict-jump-line {
+  margin: 2px 0 0;
+  font-size: 0.85rem;
+  line-height: 1.8;
+}
+
+.verdict-jump-link {
+  color: inherit;
+  font-weight: 700;
+  text-decoration: underline;
+}
+
+.verdict-jump-link:hover {
+  opacity: 0.8;
+}
+
+.verdict-danger {
+  color: var(--danger);
+  background: var(--danger-bg);
+  border-color: var(--danger-border);
+}
+
+.verdict-danger .verdict-subtext { color: var(--danger); }
+
+.verdict-warning {
+  color: var(--warning);
+  background: var(--warning-bg);
+  border-color: var(--warning-border);
+}
+
+.verdict-warning .verdict-subtext { color: var(--warning); }
+
+.verdict-neutral {
+  color: var(--text);
+  background: var(--neutral-bg);
+  border-color: var(--neutral-border);
+}
+
+.verdict-neutral .verdict-headline { color: var(--text); }
+
 .global-findings {
   display: flex;
   flex-direction: column;

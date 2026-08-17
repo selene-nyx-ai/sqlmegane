@@ -290,8 +290,8 @@ function isUnanalyzedStatement(stmt) {
 // ---------------------------------------------------------------------------
 
 /** 抽出したDML1本ぶんのサブカード。通常の文カードと同じ内容（findings・検算SELECT）を出す */
-function renderPlsqlItem(item, index) {
-  const card = el('div', { className: 'plsql-item' });
+function renderPlsqlItem(item, index, stmtNumber) {
+  const card = el('div', { className: 'plsql-item', attrs: { id: `stmt-${stmtNumber}-item-${index + 1}` } });
 
   const headRow = el('div', { className: 'plsql-item-head' });
   const title = el('div', { className: 'stmt-title' });
@@ -397,7 +397,7 @@ function renderStatementCard(stmt, dialect) {
       className: 'plsql-items-title',
       text: `抽出したDML（${stmt.plsql.items.length}件）— 1本ずつ通常の文と同じチェックをかけています`,
     }));
-    stmt.plsql.items.forEach((item, i) => list.appendChild(renderPlsqlItem(item, i)));
+    stmt.plsql.items.forEach((item, i) => list.appendChild(renderPlsqlItem(item, i, stmt.number)));
     card.appendChild(list);
   }
 
@@ -491,9 +491,12 @@ function overviewCountsText(counts) {
   return parts.join(' / ');
 }
 
+// 危険・注意の件数と該当文の一覧は先頭の判定バナー（renderVerdictBanner）に
+// 統合したため、ここでは重複させない。スクリプトモードカードは「触るテーブル
+// 一覧・文の内訳」（＋構文解析できなかった文の一覧）に絞る。
 function renderOverview(overview) {
   const card = el('div', { className: 'overview-card' });
-  card.appendChild(el('h2', { className: 'overview-title', text: 'スクリプト全体のサマリ' }));
+  card.appendChild(el('h2', { className: 'overview-title', text: 'スクリプトの内訳' }));
 
   card.appendChild(el('p', {
     className: 'overview-line',
@@ -506,19 +509,6 @@ function renderOverview(overview) {
       ? `触るテーブル: ${overview.tables.join(' / ')}`
       : '触るテーブル: 特定できませんでした',
   }));
-
-  if (overview.warnedStatements.length > 0) {
-    const line = el('p', { className: 'overview-line overview-warned' });
-    line.appendChild(document.createTextNode('⚠ 警告のある文: '));
-    overview.warnedStatements.forEach((num, i) => {
-      if (i > 0) line.appendChild(document.createTextNode(', '));
-      const a = el('a', { className: 'overview-link', text: `#${num}`, attrs: { href: `#stmt-${num}` } });
-      line.appendChild(a);
-    });
-    card.appendChild(line);
-  } else {
-    card.appendChild(el('p', { className: 'overview-line', text: '危険・注意レベルの検出があった文はありません（検出できない危険もあります）。' }));
-  }
 
   if (overview.fallbackStatements.length > 0) {
     card.appendChild(el('p', {
@@ -540,6 +530,114 @@ function renderOverview(overview) {
   }
 
   return card;
+}
+
+// ---------------------------------------------------------------------------
+// 判定バナー（結果エリア先頭。プロダクトオーナー指摘: スクロールしないと
+// 全部見きれないから、冒頭に危険/注意/情報が何件あるかを出すべき。
+// ユーザーはできる限りUIを操作したくない設計にする）
+// ---------------------------------------------------------------------------
+//
+// 集計対象は「文それ自身のfindings」「globalFindings（バッチ全体向け）」
+// 「PL/SQLユニット内に抽出したDML（plsql.items）のfindings」の3種類すべて。
+// PL/SQL内の抽出DMLのfindings（カーソルwarning等）を含めないと、冒頭の件数が
+// 実際にレビューすべき件数と食い違ってしまうため必須。
+
+/**
+ * 解析結果全体から、判定バナーに必要な「severity別の件数」と「危険・注意の
+ * ジャンプ先一覧（文番号ラベル → アンカー）」を1回の走査で組み立てる。
+ * globalFindingsは特定の文に紐づかない（＝ジャンプ先アンカーが無い）ため、
+ * 件数には数えるがジャンプ一覧には含めない。
+ * PL/SQL内の抽出DMLは「文N-抽出M」ラベルで、そのサブカード自身のアンカー
+ * （#stmt-N-item-M。renderPlsqlItemが付与）へジャンプする。
+ */
+function computeVerdict(result) {
+  const counts = { danger: 0, warning: 0, info: 0 };
+  const dangerJumps = new Map();
+  const warningJumps = new Map();
+
+  const addJump = (severity, label, anchor) => {
+    if (severity === 'danger') dangerJumps.set(label, anchor);
+    else if (severity === 'warning') warningJumps.set(label, anchor);
+  };
+
+  for (const stmt of result.statements) {
+    for (const f of stmt.findings) {
+      counts[f.severity]++;
+      addJump(f.severity, `文${stmt.number}`, `#stmt-${stmt.number}`);
+    }
+    if (stmt.plsql) {
+      stmt.plsql.items.forEach((item, i) => {
+        for (const f of item.findings) {
+          counts[f.severity]++;
+          addJump(f.severity, `文${stmt.number}-抽出${i + 1}`, `#stmt-${stmt.number}-item-${i + 1}`);
+        }
+      });
+    }
+  }
+  for (const f of result.globalFindings) {
+    counts[f.severity]++;
+  }
+
+  return { counts, dangerJumps, warningJumps };
+}
+
+/** 「危険: 文3・文7」のような、ジャンプリンクを「・」区切りで並べた行を作る */
+function renderVerdictJumpLine(labelPrefix, jumps) {
+  const line = el('p', { className: 'verdict-jump-line' });
+  line.appendChild(document.createTextNode(labelPrefix));
+  let i = 0;
+  for (const [label, anchor] of jumps) {
+    if (i > 0) line.appendChild(document.createTextNode('・'));
+    line.appendChild(el('a', { className: 'verdict-jump-link', text: label, attrs: { href: anchor } }));
+    i++;
+  }
+  return line;
+}
+
+/**
+ * 判定バナー本体。文が1件でも、findingsが0件でも、結果エリアの一番上に
+ * 常に表示する（スクロールせず見える設計にするのが目的なので、条件付きで
+ * 出し分けたりはしない）。
+ */
+function renderVerdictBanner(result) {
+  const { counts, dangerJumps, warningJumps } = computeVerdict(result);
+  const level = counts.danger > 0 ? 'danger' : (counts.warning > 0 ? 'warning' : 'neutral');
+
+  const wrap = el('div', { className: `verdict-banner verdict-${level}`, attrs: { role: 'status' } });
+
+  const headline = el('p', { className: 'verdict-headline' });
+  const segs = [];
+  if (level === 'danger') {
+    segs.push(`🔴 危険 ${counts.danger}件`);
+    segs.push(`⚠ 注意 ${counts.warning}件`);
+    segs.push(`情報 ${counts.info}件`);
+  } else if (level === 'warning') {
+    segs.push(`⚠ 注意 ${counts.warning}件`);
+    segs.push(`情報 ${counts.info}件`);
+  } else {
+    segs.push(`明らかな危険は検出されませんでした（情報 ${counts.info}件）`);
+  }
+  headline.textContent = segs.join(' ／ ');
+  wrap.appendChild(headline);
+
+  if (level === 'danger') {
+    wrap.appendChild(el('p', {
+      className: 'verdict-subtext verdict-subtext-strong',
+      text: '実行前に危険箇所の確認が必要です。',
+    }));
+  } else if (level === 'neutral') {
+    // 過信防止文言（about-panelのdisclaimerと同じ趣旨をバナー内にも明示する）
+    wrap.appendChild(el('p', {
+      className: 'verdict-subtext',
+      text: '「危険が検出されない = 安全」ではありません。検出できない危険もあります。最終判断は必ず人間が行ってください。',
+    }));
+  }
+
+  if (dangerJumps.size > 0) wrap.appendChild(renderVerdictJumpLine('危険: ', dangerJumps));
+  if (warningJumps.size > 0) wrap.appendChild(renderVerdictJumpLine('注意: ', warningJumps));
+
+  return wrap;
 }
 
 function renderGlobalFindings(globalFindings) {
@@ -578,21 +676,29 @@ function render() {
     return;
   }
 
-  if (autoDetection) {
-    els.results.appendChild(renderAutoDialectNotice(autoDetection, dialect));
-    if (autoDetection.reason === 'parse-success-ambiguous') {
-      // 複数方言のパーサで解析に成功したANSI互換SQLの可能性が高いケース。
-      // AST解析のためにmysqlへ解決してはいるが「mysqlだと言い切れる根拠」は
-      // 無いため、mysql固有のTips（LIMIT句の案内）だけは表示しない。
-      for (const stmt of result.statements) {
-        stmt.findings = stmt.findings.filter((f) => f.code !== 'mysql-no-limit');
-        if (stmt.plsql) {
-          for (const item of stmt.plsql.items) {
-            item.findings = item.findings.filter((f) => f.code !== 'mysql-no-limit');
-          }
+  if (autoDetection && autoDetection.reason === 'parse-success-ambiguous') {
+    // 複数方言のパーサで解析に成功したANSI互換SQLの可能性が高いケース。
+    // AST解析のためにmysqlへ解決してはいるが「mysqlだと言い切れる根拠」は
+    // 無いため、mysql固有のTips（LIMIT句の案内）だけは表示しない。
+    // 判定バナーの件数もこのfindingsを見て集計するため、バナーを組み立てる
+    // 前に必ずフィルタしておく。
+    for (const stmt of result.statements) {
+      stmt.findings = stmt.findings.filter((f) => f.code !== 'mysql-no-limit');
+      if (stmt.plsql) {
+        for (const item of stmt.plsql.items) {
+          item.findings = item.findings.filter((f) => f.code !== 'mysql-no-limit');
         }
       }
     }
+  }
+
+  // 判定バナー: 結果エリアの一番先頭（textareaの直下）に常に表示する。
+  // プロダクトオーナー指摘「スクロールしないと全部見きれない」への対応で、
+  // 危険/注意/情報の件数がスクロールなしで即わかることを最優先する。
+  els.results.appendChild(renderVerdictBanner(result));
+
+  if (autoDetection) {
+    els.results.appendChild(renderAutoDialectNotice(autoDetection, dialect));
   }
 
   els.results.appendChild(renderAnalysisBadge(result));
