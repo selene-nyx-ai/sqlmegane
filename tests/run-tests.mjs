@@ -837,7 +837,7 @@ function headline(sql, dialect) {
   return s.summary.headline;
 }
 
-test('見出し1: しぐれさん指摘のSQL — JOIN・WHERE・SETがすべて一文に入る', () => {
+test('見出し1: プロダクトオーナー指摘のSQL — JOIN・WHERE・SETがすべて一文に入る', () => {
   const h = headline('UPDATE users u LEFT JOIN orders o ON u.id = o.user_id SET u.flag = 1 WHERE o.total > 100;');
   // LEFT JOIN が WHERE で打ち消されている（NULL行は必ず落ちる）ので「一致する行がある」が正しい
   assert.equal(h, '`orders` に一致する行がある `users`（別名 u）のうち、`o.total` が 100 より大きい行の `flag` を 1 に更新します');
@@ -1832,7 +1832,7 @@ test('カーソル定義のWHERE 1=1はwarningで検出される（AST経路・m
   assert.match(f.message, /カーソル/);
 });
 
-test('しぐれさん再現ケース: plsql-sample-real.sql のカーソルWHEREを1=1に変えるとwarningが出る', () => {
+test('実機再現ケース: plsql-sample-real.sql のカーソルWHEREを1=1に変えるとwarningが出る', () => {
   // サンプルファイルは別リポジトリ（AutoClaude/business/）にある実データのため、
   // sqlmegane側には存在しない場合スキップする（CI等で当該パスが無い環境を想定）。
   const samplePath = 'D:\\GitHub\\AutoClaude\\business\\plsql-sample-real.sql';
@@ -2179,7 +2179,7 @@ test('機能B: Oracle方言のマーカー（NVL・SYSDATE・ROWNUM・(+)・%TYP
   assert.ok(d.markers.length > 0 && d.markers.length <= 3);
 });
 
-test('機能B: しぐれさん提供の実サンプル（PL/SQLパッケージ）がoracleと判定される', () => {
+test('機能B: 実プロジェクト由来のサンプル（PL/SQLパッケージ）がoracleと判定される', () => {
   const samplePath = path.join('d:', 'GitHub', 'AutoClaude', 'business', 'plsql-sample-real.sql');
   if (!fs.existsSync(samplePath)) {
     console.warn('  [skip] plsql-sample-real.sql が見つからないためスキップ:', samplePath);
