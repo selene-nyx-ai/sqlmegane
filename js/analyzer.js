@@ -32,6 +32,8 @@
 // 行うことで、この種の名前衝突を避ける。
 (function () {
 
+const I18n = globalThis.SQLMeganeI18n;
+
 // ---------------------------------------------------------------------------
 // 低レベルユーティリティ: 文字列リテラル / コメントを意識した走査
 // ---------------------------------------------------------------------------
@@ -997,7 +999,8 @@ function finalizeVerifySelect(sql) {
   if (!sql) return { sql: null, hasJoin: false };
   const hasJoin = verifySelectHasJoin(sql);
   if (!hasJoin) return { sql, hasJoin: false };
-  return { sql: `-- ${VERIFY_SELECT_JOIN_NOTE}\n${sql}`, hasJoin: true };
+  const note = I18n ? I18n.t('ui.verifySqlJoinNote') : VERIFY_SELECT_JOIN_NOTE;
+  return { sql: `-- ${note}\n${sql}`, hasJoin: true };
 }
 
 function buildVerifySelectFromAst(kind, ast, masked, plain, whereInfo) {
@@ -1020,6 +1023,14 @@ function buildVerifySelectFromAst(kind, ast, masked, plain, whereInfo) {
 // ---------------------------------------------------------------------------
 
 function mk(severity, code, title, message) {
+  if (I18n && I18n.getLocale() === 'en') {
+    const table = I18n.messages.en;
+    title = table[`finding.${code}.title`] || I18n.t('finding.default.title');
+    message = table[`finding.${code}.message`] || I18n.t('finding.default.message');
+  } else if (I18n) {
+    title = I18n.t('common.text', { value: title });
+    message = I18n.t('common.text', { value: message });
+  }
   return { severity, code, title, message };
 }
 
@@ -1153,6 +1164,26 @@ const PLSQL_CONTROL_FLOW_NOTE_MESSAGE =
   'PL/SQLの制御フロー（ループ・分岐・例外処理）は解析していません。抽出したDML単位の簡易チェックです。'
   + 'どのDMLが実際に何回実行されるか、例外時に何がロールバックされるかは判断していません。';
 
+function englishFallbackSummary(sql, kind) {
+  if (!I18n || I18n.getLocale() !== 'en') return null;
+  const tableMatch = kind === 'DELETE' ? /\bDELETE\s+(?:FROM\s+)?([^\s;]+)/i.exec(sql)
+    : kind === 'UPDATE' ? /\bUPDATE\s+([^\s;]+)/i.exec(sql)
+    : kind === 'TRUNCATE_TABLE' ? /\bTRUNCATE\s+(?:TABLE\s+)?([^\s;]+)/i.exec(sql) : null;
+  const table = tableMatch ? '`' + tableMatch[1].replace(/^[`"\[]|[`"\]]$/g, '') + '`' : I18n.t('summary.unknownTable');
+  const whereMatch = /\bWHERE\s+([\s\S]*?)(?:;|$)/i.exec(sql);
+  const where = whereMatch ? whereMatch[1].trim() : '';
+  let op = kind === 'TRUNCATE_TABLE' ? 'TRUNCATE' : kind;
+  let headline;
+  if (kind === 'DELETE') headline = where ? I18n.t('summary.deleteWhere', { table, where }) : I18n.t('summary.deleteAll', { table });
+  else if (kind === 'UPDATE') headline = where ? I18n.t('summary.updateWhere', { table, where, sets: 'the specified values' }) : I18n.t('summary.updateAll', { table, sets: 'the specified values' });
+  else if (kind === 'TRUNCATE_TABLE') headline = I18n.t('summary.truncate', { table });
+  else return null;
+  const blocks = [];
+  if (!where && (kind === 'UPDATE' || kind === 'DELETE')) blocks.push({ type: 'text', text: I18n.t('summary.whereNone') });
+  else if (where) blocks.push({ type: 'text', text: I18n.t('summary.where', { where }) });
+  return { op, headline, headlineParts: [{ text: headline, strong: false }], blocks };
+}
+
 /**
  * PL/SQLユニット1件を解析する。
  * 中の埋め込みDMLを抽出し、それぞれを通常の1文解析にかけてサブ結果として返す。
@@ -1197,7 +1228,7 @@ function analyzePlsqlUnit(unitText, dialect) {
       // 検算SELECTのWHERE句にPL/SQL変数・バインド変数が残っている場合は、
       // そのままでは実行できないことを利用者に明示する必要がある。
       verifySelectHasRuntimeVariable: P.hasRuntimeVariable(verifySelect),
-      summary: r.summary,
+      summary: r.summary || englishFallbackSummary(item.sql, r.kind),
       parse: r.parse,
       tables: collectTables(r),
     };
@@ -1780,7 +1811,7 @@ function analyzeSQL(fullText, dialect) {
       findings,
       verifySelect: result.verifySelect,
       verifySelectHasJoin: !!result.verifySelectHasJoin,
-      summary: result.summary,
+      summary: result.summary || englishFallbackSummary(raw, kind),
       parse,
       plsql: result.plsql || null,
       tables: collectTables(result),

@@ -25,6 +25,9 @@
  */
 (function () {
 
+const I18n = globalThis.SQLMeganeI18n;
+const tr = (key, params) => I18n ? I18n.t(key, params) : key;
+
 // ---------------------------------------------------------------------------
 // マスキング: 文字列リテラル / コメント / q'記法 を無害化する
 // ---------------------------------------------------------------------------
@@ -220,9 +223,9 @@ function parseUnitHeader(maskedUnit) {
     };
   }
   if (/^\s*DECLARE\b/i.test(maskedUnit)) {
-    return { unitKind: '無名ブロック（DECLARE）', unitName: null, headerEnd: 0 };
+    return { unitKind: tr('plsql.anonymousDeclare'), unitName: null, headerEnd: 0 };
   }
-  return { unitKind: '無名ブロック（BEGIN）', unitName: null, headerEnd: 0 };
+  return { unitKind: tr('plsql.anonymousBegin'), unitName: null, headerEnd: 0 };
 }
 
 // ---------------------------------------------------------------------------
@@ -359,7 +362,7 @@ function extractPlsqlUnit(unitText) {
             && /^\s*SELECT\b/i.test(masked.slice(t.index + 1, closeIdx))) {
           cursorCount++;
           items.push({
-            label: 'カーソル定義（FORループ）',
+            label: tr('plsql.cursorFor'),
             kind: 'CURSOR',
             cursorName: ti >= 2 ? tokens[ti - 2].text : null,
             sql: plain.slice(t.index + 1, closeIdx).trim(),
@@ -413,7 +416,7 @@ function extractPlsqlUnit(unitText) {
     let kind = u;
     let cursorName = null;
     if (u === 'SELECT' && pendingCursorName) {
-      label = 'カーソル定義';
+      label = tr('plsql.cursor');
       kind = 'CURSOR';
       cursorName = pendingCursorName;
       pendingCursorName = null;
@@ -450,9 +453,17 @@ function extractPlsqlUnit(unitText) {
 const DML_LABEL_ORDER = ['UPDATE', 'DELETE', 'INSERT', 'MERGE', 'SELECT'];
 
 function buildStructureSummary(info) {
+  if (I18n && I18n.getLocale() === 'en') {
+    const counts = {};
+    for (const item of info.items) if (item.kind !== 'CURSOR') counts[item.kind] = (counts[item.kind] || 0) + 1;
+    const dml = DML_LABEL_ORDER.filter((kind) => counts[kind]).map((kind) => `${kind} ${counts[kind]}`).join(', ') || tr('plsql.en.none');
+    const routines = [`procedures: ${info.procedureCount}`, `functions: ${info.functionCount}`].join(', ');
+    const tx = [info.hasCommit && tr('plsql.en.commit'), info.hasRollback && tr('plsql.en.rollback')].filter(Boolean).join(', ') || tr('plsql.en.noTransaction');
+    return tr('plsql.en.structure', { unit: info.unitKind, routines, dml, cursors: info.cursorCount, transaction: tx });
+  }
   const parts = [];
-  if (info.procedureCount > 0) parts.push(`プロシージャ${info.procedureCount}個`);
-  if (info.functionCount > 0) parts.push(`ファンクション${info.functionCount}個`);
+  if (info.procedureCount > 0) parts.push(tr('plsql.procedures', { count: info.procedureCount }));
+  if (info.functionCount > 0) parts.push(tr('plsql.functions', { count: info.functionCount }));
 
   const counts = {};
   for (const item of info.items) {
@@ -461,16 +472,16 @@ function buildStructureSummary(info) {
   }
   const dmlParts = [];
   for (const k of DML_LABEL_ORDER) {
-    if (counts[k]) dmlParts.push(`${k} ${counts[k]}本`);
+    if (counts[k]) dmlParts.push(tr('plsql.dmlCount', { kind: k, count: counts[k] }));
   }
-  parts.push(dmlParts.length > 0 ? `抽出したDML: ${dmlParts.join('・')}` : '抽出したDML: なし');
+  parts.push(dmlParts.length > 0 ? tr('plsql.dml', { items: dmlParts.join('・') }) : tr('plsql.dmlNone'));
 
-  if (info.cursorCount > 0) parts.push(`カーソル${info.cursorCount}個`);
+  if (info.cursorCount > 0) parts.push(tr('plsql.cursors', { count: info.cursorCount }));
 
   const tx = [];
-  if (info.hasCommit) tx.push('COMMITあり');
-  if (info.hasRollback) tx.push('ROLLBACKあり');
-  parts.push(tx.length > 0 ? tx.join('・') : 'COMMIT/ROLLBACKなし');
+  if (info.hasCommit) tx.push(tr('plsql.commit'));
+  if (info.hasRollback) tx.push(tr('plsql.rollback'));
+  parts.push(tx.length > 0 ? tx.join('・') : tr('plsql.noTransaction'));
 
   return parts.join(' / ');
 }

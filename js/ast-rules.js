@@ -17,8 +17,17 @@
 (function () {
 
 const A = globalThis.SQLMeganeSqlAst;
+const I18n = globalThis.SQLMeganeI18n;
 
 function mk(severity, code, title, message) {
+  if (I18n && I18n.getLocale() === 'en') {
+    const table = I18n.messages.en;
+    title = table[`finding.${code}.title`] || I18n.t('finding.default.title');
+    message = table[`finding.${code}.message`] || I18n.t('finding.default.message');
+  } else if (I18n) {
+    title = I18n.t('common.text', { value: title });
+    message = I18n.t('common.text', { value: message });
+  }
   return { severity, code, title, message };
 }
 

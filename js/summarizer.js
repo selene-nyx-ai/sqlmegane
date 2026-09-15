@@ -17,6 +17,8 @@
 (function () {
 
 const A = globalThis.SQLMeganeSqlAst;
+const I18n = globalThis.SQLMeganeI18n;
+const t = (key, params) => I18n ? I18n.t(key, params) : key;
 
 // ---------------------------------------------------------------------------
 // ラベル生成
@@ -825,6 +827,112 @@ function summarizeSimple(op, parts) {
   ), false));
 }
 
+function enTable(ref) {
+  if (!ref) return t('summary.unknownTable');
+  const name = ref.table || ref.name || ref.value || ref;
+  const alias = ref.as || ref.alias;
+  return alias && alias !== name ? `${q(name)} (alias ${alias})` : q(name);
+}
+
+function enValue(node) {
+  if (node == null) return '?';
+  if (typeof node === 'string') return q(node);
+  if (node.type === 'column_ref') {
+    const col = A.columnName(node.column);
+    return node.table ? `${q(node.table)}.${q(col)}` : q(col);
+  }
+  const lit = A.literalText(node);
+  if (lit != null) return String(lit);
+  if (node.type === 'null') return 'NULL';
+  if (node.value !== undefined && typeof node.value !== 'object') return String(node.value);
+  return '?';
+}
+
+function enCondition(expr) {
+  if (!expr) return '';
+  const op = String(expr.operator || '').toUpperCase();
+  if (op === 'AND' || op === 'OR') return `${enCondition(expr.left)} ${op} ${enCondition(expr.right)}`;
+  if (op === 'IN' || op === 'NOT IN') return `${enValue(expr.left)} ${op} (...)`;
+  if (op === 'BETWEEN' || op === 'NOT BETWEEN') return `${enValue(expr.left)} ${op} ${enValue(expr.right)}`;
+  if (op) return `${enValue(expr.left)} ${op} ${enValue(expr.right)}`;
+  return enValue(expr);
+}
+
+function enAssignments(ast) {
+  const sets = Array.isArray(ast.set) ? ast.set : [];
+  if (sets.length === 0) return 'the specified values';
+  return sets.map((s) => `${enValue(s.column)} = ${enValue(s.value)}`).join(', ');
+}
+
+function summarizeEnglish(ast) {
+  const type = String(ast.type || '').toLowerCase();
+  const targets = A.writeTargets(ast);
+  const rows = A.rowSourceTables(ast);
+  const table = enTable(targets[0] || rows[0]);
+  const blocks = [];
+  let op;
+  let headline;
+
+  if (type === 'delete') {
+    op = 'DELETE';
+    headline = ast.where ? t('summary.deleteWhere', { table, where: enCondition(ast.where) }) : t('summary.deleteAll', { table });
+  } else if (type === 'update') {
+    op = 'UPDATE';
+    const sets = enAssignments(ast);
+    headline = ast.where ? t('summary.updateWhere', { table, where: enCondition(ast.where), sets }) : t('summary.updateAll', { table, sets });
+    blocks.push({ type: 'text', text: t('summary.set', { sets }) });
+  } else if (type === 'truncate') {
+    op = 'TRUNCATE';
+    headline = t('summary.truncate', { table: Array.isArray(ast.name) ? enTable(ast.name[0]) : table });
+  } else if (type === 'insert' || type === 'replace') {
+    op = 'INSERT';
+    headline = t('summary.insert', { table });
+    const cols = Array.isArray(ast.columns) ? ast.columns.map((c) => A.columnName(c)).filter(Boolean).map(q) : [];
+    if (cols.length) blocks.push({ type: 'text', text: t('summary.columns', { columns: cols.join(', ') }) });
+  } else if (type === 'select') {
+    op = 'SELECT';
+    const names = selectIsStar(ast) ? t('summary.selectAll') : (Array.isArray(ast.columns) ? ast.columns.map((c) => {
+      const value = c && c.expr ? enValue(c.expr) : enValue(c);
+      return c && c.as ? `${value} (alias ${c.as})` : value;
+    }).join(', ') : t('summary.selectAll'));
+    headline = t('summary.select', { columns: names, table: rows[0] ? enTable(rows[0]) : 'the expression', where: ast.where ? ` where ${enCondition(ast.where)}` : '' });
+  } else if (type === 'drop') {
+    op = 'DROP';
+    headline = t('summary.drop', { target: Array.isArray(ast.name) ? enTable(ast.name[0]) : t('summary.unknownTarget') });
+  } else return null;
+
+  if ((type === 'update' || type === 'delete') && !ast.where) blocks.push({ type: 'text', text: t('summary.whereNone') });
+  else if (ast.where) blocks.push({ type: 'text', text: t('summary.where', { where: enCondition(ast.where) }) });
+  for (let i = 1; i < rows.length; i++) {
+    const kind = String(rows[i].join || 'JOIN').toUpperCase();
+    const key = kind.includes('LEFT') ? 'summary.join.left' : kind.includes('RIGHT') ? 'summary.join.right'
+      : kind.includes('FULL') ? 'summary.join.full' : kind.includes('CROSS') ? 'summary.join.cross'
+      : (kind.includes('INNER') || kind === 'JOIN') ? 'summary.join.inner' : 'summary.join.other';
+    blocks.push({ type: 'join', text: t(key, { table: enTable(rows[i]), kind }) });
+  }
+  if (ast.groupby) blocks.push({ type: 'text', text: t('summary.groupby') });
+  if (ast.limit && ast.limit.value) blocks.push({ type: 'text', text: t('summary.limit', { value: ast.limit.value.map(enValue).join(', ') }) });
+  if (ast.with && ast.with.length) blocks.unshift({ type: 'text', text: t('summary.cte', { names: ast.with.map((w) => (w.name && (w.name.value || w.name)) || '?').join(', ') }) });
+  return { op, headline, headlineParts: [{ text: headline, strong: false }], blocks };
+}
+
+function localizeJapaneseSummary(summary) {
+  const translateItem = (item) => ({
+    ...item,
+    text: item.text === undefined ? item.text : t('common.text', { value: item.text }),
+    children: Array.isArray(item.children) ? item.children.map(translateItem) : item.children,
+  });
+  summary.headline = t('common.text', { value: summary.headline });
+  if (Array.isArray(summary.headlineParts)) summary.headlineParts = summary.headlineParts.map(translateItem);
+  summary.blocks = summary.blocks.map((block) => ({
+    ...block,
+    title: block.title === undefined ? block.title : t('common.text', { value: block.title }),
+    text: block.text === undefined ? block.text : t('common.text', { value: block.text }),
+    items: Array.isArray(block.items) ? block.items.map(translateItem) : block.items,
+  }));
+  return summary;
+}
+
 // ---------------------------------------------------------------------------
 // エントリポイント
 // ---------------------------------------------------------------------------
@@ -835,6 +943,7 @@ function summarizeSimple(op, parts) {
  */
 function summarize(ast) {
   if (!ast || typeof ast !== 'object') return null;
+  if (I18n && I18n.getLocale() === 'en') return summarizeEnglish(ast);
   let summary = null;
 
   switch (ast.type) {
@@ -866,7 +975,7 @@ function summarize(ast) {
     summary.blocks.unshift({ type: 'text', text: `WITH句（CTE）: ${names} を先に組み立ててから本体を実行します。` });
   }
 
-  return summary;
+  return localizeJapaneseSummary(summary);
 }
 
 /** 要約を素のテキスト行に落とす（テスト・コピー用） */

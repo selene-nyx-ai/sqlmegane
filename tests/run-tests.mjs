@@ -14,6 +14,7 @@ import { fileURLToPath } from 'node:url';
 // globalThis.SQLMeganeAnalyzer から必要な関数を取り出す。
 // 同梱パーサ（UMD）と AST 関連モジュールも同じ方式で読み込む。
 // index.html の <script> の並び順と同じ順序で読み込むこと。
+import '../js/i18n.js';
 import '../js/vendor/node-sql-parser-mysql.js';
 import '../js/vendor/node-sql-parser-postgresql.js';
 import '../js/vendor/node-sql-parser-transactsql.js';
@@ -2372,6 +2373,82 @@ test('CLI: 引数解析の境界（値なしオプション・重複ファイル
     fs.unlinkSync(tmp);
   }
   assert.equal(runCli(['nonexistent_file_xyz.sql']).status, 1);
+});
+
+// ---------------------------------------------------------------------------
+// 英語ロケール
+// ---------------------------------------------------------------------------
+
+test('i18n: ja と en のメッセージキー集合が一致する', () => {
+  const { messages } = globalThis.SQLMeganeI18n;
+  assert.deepEqual(Object.keys(messages.en).sort(), Object.keys(messages.ja).sort());
+});
+
+test('i18n: 主要SQLの英語要約とfindingに日本語文字が混ざらない', () => {
+  const I18n = globalThis.SQLMeganeI18n;
+  const japanese = /[\u3040-\u30ff\u3400-\u9fff]/;
+  const cases = [
+    ['DELETE FROM m_users;', 'mysql'],
+    ["UPDATE m_users SET status = 'INACTIVE' WHERE last_login < '2024-01-01';", 'mysql'],
+    ['TRUNCATE TABLE m_users;', 'mysql'],
+    ["SELECT u.id FROM users u LEFT JOIN orders o ON u.id = o.user_id WHERE o.status = 'x';", 'mysql'],
+    [['BEGIN', '  DELETE FROM m_users;', 'END;', '/'].join('\n'), 'oracle'],
+  ];
+  I18n.setLocale('en');
+  try {
+    for (const [sql, dialect] of cases) {
+      const result = analyzeSQL(sql, dialect);
+      const visible = [];
+      for (const stmt of result.statements) {
+        if (stmt.summary) visible.push(...summaryToLines(stmt.summary));
+        for (const f of stmt.findings) visible.push(f.title, f.message);
+        if (stmt.plsql) {
+          visible.push(stmt.plsql.unitKind, stmt.plsql.structure);
+          for (const item of stmt.plsql.items) {
+            if (item.summary) visible.push(...summaryToLines(item.summary));
+            for (const f of item.findings) visible.push(f.title, f.message);
+          }
+        }
+      }
+      assert.ok(visible.length > 0, sql);
+      assert.ok(!japanese.test(visible.join('\n')), visible.join('\n'));
+    }
+  } finally {
+    I18n.setLocale('ja');
+  }
+});
+
+test('i18n: setLocale(ja) で既存の日本語要約に戻る', () => {
+  const I18n = globalThis.SQLMeganeI18n;
+  I18n.setLocale('en');
+  firstStatement('DELETE FROM m_users;', 'mysql');
+  I18n.setLocale('ja');
+  assert.equal(firstStatement('DELETE FROM m_users;', 'mysql').summary.headline, '`m_users` の全行を削除します');
+});
+
+test('i18n: en/index.html は index.html と同じ順序で同じJSを読み込む', () => {
+  const scripts = (html) => [...html.matchAll(/<script src="(?:\.\.\/)?(js\/[^"]+)"><\/script>/g)].map((m) => m[1]);
+  assert.deepEqual(scripts(readProjectFile('en/index.html')), scripts(readProjectFile('index.html')));
+});
+
+test('CLI: --lang en は英語を出力し終了コードの意味を維持する', () => {
+  const r = runCli(['--lang', 'en', '-'], 'DELETE FROM t_log;');
+  assert.equal(r.status, 2, r.stdout + r.stderr);
+  assert.match(r.stdout, /DELETE: deletes ALL rows of `t_log`/);
+  assert.match(r.stdout, /\[DANGER\]/);
+  assert.ok(!/[\u3040-\u30ff\u3400-\u9fff]/.test(r.stdout), r.stdout);
+});
+
+test('en/index.html は英語が静的に焼き込まれ、インラインスクリプト無しで data-locale=en を持つ（tools/build-en.mjs の生成物）', () => {
+  const html = readProjectFile('en/index.html');
+  assert.match(html, /<html lang="en" data-locale="en">/);
+  assert.match(html, /<title>SQLMegane — Review SQL before you run it<\/title>/);
+  assert.ok(!html.includes('SQLMEGANE_LOCALE'), 'インラインスクリプトでロケールを渡していない（CSP と両立させるため data-locale を使う）');
+  const jp = /[぀-ヿ㐀-鿿]/;
+  const body = html.slice(html.indexOf('<body'));
+  const jpLines = body.split('
+').filter((l) => jp.test(l) && !/^\s*(<!--|[^<]*-->|同梱パーサ|js\/vendor|ライセンス)/.test(l));
+  assert.deepEqual(jpLines.map((l) => l.trim().slice(0, 40)), ['<div><a href="../" lang="ja" data-i18n="u'], '日本語が残るのは日本語ページへのリンクだけ');
 });
 
 // ---------------------------------------------------------------------------

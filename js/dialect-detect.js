@@ -23,6 +23,9 @@
  */
 (function () {
 
+const I18n = globalThis.SQLMeganeI18n;
+const t = (key) => I18n ? I18n.t(key) : key;
+
 // ---------------------------------------------------------------------------
 // ヒューリスティックマーカー定義
 // ---------------------------------------------------------------------------
@@ -33,7 +36,7 @@
 
 const MARKERS = {
   oracle: [
-    { label: '(+)結合', re: /\(\s*\+\s*\)/ },
+    { labelKey: 'dialect.marker.outerJoin', re: /\(\s*\+\s*\)/ },
     { label: 'ROWNUM', re: /\bROWNUM\b/i },
     { label: 'NVL(', re: /\bNVL\s*\(/i },
     { label: 'SYSDATE', re: /\bSYSDATE\b/i },
@@ -42,29 +45,29 @@ const MARKERS = {
     { label: 'MERGE INTO', re: /\bMERGE\s+INTO\b/i },
   ],
   mssql: [
-    { label: '@変数', re: /@[A-Za-z_][\w$]*/ },
-    { label: '[角括弧識別子]', re: /\[[A-Za-z_][^\]]*\]/ },
+    { labelKey: 'dialect.marker.variable', re: /@[A-Za-z_][\w$]*/ },
+    { labelKey: 'dialect.marker.bracketIdentifier', re: /\[[A-Za-z_][^\]]*\]/ },
     { label: 'TOP n', re: /\bTOP\s+\d+\b/i },
     { label: 'GETDATE()', re: /\bGETDATE\s*\(/i },
     { label: 'ISNULL(', re: /\bISNULL\s*\(/i },
     { label: 'BEGIN TRAN', re: /\bBEGIN\s+TRAN(?:SACTION)?\b/i },
-    { label: 'sp_プレフィックス', re: /\bsp_[A-Za-z_]/i },
+    { labelKey: 'dialect.marker.spPrefix', re: /\bsp_[A-Za-z_]/i },
     { label: 'NOLOCK', re: /\bNOLOCK\b/i },
   ],
   mysql: [
-    { label: 'バッククォート', re: /`[^`]+`/ },
+    { labelKey: 'dialect.marker.backtick', re: /`[^`]+`/ },
     { label: 'LIMIT n', re: /\bLIMIT\s+\d+/i },
     { label: 'NOW()', re: /\bNOW\s*\(/i },
     { label: 'ON DUPLICATE KEY', re: /\bON\s+DUPLICATE\s+KEY\b/i },
     { label: 'AUTO_INCREMENT', re: /\bAUTO_INCREMENT\b/i },
   ],
   postgres: [
-    { label: '::キャスト', re: /::[A-Za-z_]/ },
+    { labelKey: 'dialect.marker.cast', re: /::[A-Za-z_]/ },
     { label: 'RETURNING', re: /\bRETURNING\b/i },
     { label: 'ILIKE', re: /\bILIKE\b/i },
     { label: 'ON CONFLICT', re: /\bON\s+CONFLICT\b/i },
     { label: 'SERIAL', re: /\bSERIAL\b/i },
-    { label: '$n（位置パラメータ）', re: /\$\d+\b/ },
+    { labelKey: 'dialect.marker.position', re: /\$\d+\b/ },
   ],
 };
 
@@ -105,7 +108,7 @@ function scoreMarkers(masked) {
     for (const marker of MARKERS[dialect]) {
       if (marker.re.test(masked)) {
         scores[dialect]++;
-        hitMarkers[dialect].push(marker.label);
+        hitMarkers[dialect].push(marker.labelKey ? t(marker.labelKey) : marker.label);
       }
     }
   }
@@ -174,12 +177,12 @@ function detectDialect(sqlText) {
 
   if (MYSQL_BACKSLASH_ESCAPE_RE.test(sql)) {
     scores.mysql++;
-    hitMarkers.mysql.push('バックスラッシュエスケープ');
+    hitMarkers.mysql.push(t('dialect.marker.backslash'));
   }
 
   if (detectPlsqlUnitMarker(sql)) {
     scores.oracle++;
-    hitMarkers.oracle.unshift('PL/SQLユニット構造');
+    hitMarkers.oracle.unshift(t('dialect.marker.plsql'));
   }
 
   const ranked = Object.keys(scores)

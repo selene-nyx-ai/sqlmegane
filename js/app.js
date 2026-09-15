@@ -10,6 +10,19 @@
 
 const { analyzeSQL, collectPlsqlFindings } = globalThis.SQLMeganeAnalyzer;
 const { detectDialect } = globalThis.SQLMeganeDialectDetect || {};
+const I18n = globalThis.SQLMeganeI18n;
+const t = (key, params) => I18n.t(key, params);
+
+if (I18n.getLocale() === 'en') {
+  document.querySelectorAll('[data-i18n]').forEach((node) => {
+    const value = t(node.dataset.i18n);
+    const attr = node.dataset.i18nAttr;
+    if (attr) node.setAttribute(attr, value);
+    else if (node.dataset.i18nHtml === 'true') node.innerHTML = value;
+    else node.textContent = value;
+  });
+  document.querySelectorAll('[data-i18n-aria]').forEach((node) => node.setAttribute('aria-label', t(node.dataset.i18nAria)));
+}
 
 const els = {
   input: document.getElementById('sql-input'),
@@ -31,21 +44,21 @@ const KIND_LABELS = {
   DROP_OTHER: 'DROP',
   CREATE: 'CREATE',
   ALTER: 'ALTER',
-  BEGIN_TX: 'BEGIN / トランザクション開始',
+  BEGIN_TX: t('ui.kind.begin'),
   END_TX: 'COMMIT / ROLLBACK',
-  PLSQL_UNIT: 'PL/SQLユニット',
-  OTHER: 'その他',
+  PLSQL_UNIT: t('ui.kind.plsql'),
+  OTHER: t('ui.kind.other'),
 };
 
-const SEVERITY_LABELS = { danger: '危険', warning: '注意', info: '情報' };
+const SEVERITY_LABELS = { danger: t('ui.severity.danger'), warning: t('ui.severity.warning'), info: t('ui.severity.info') };
 
 const DIALECT_LABELS = {
-  generic: '汎用',
+  generic: t('ui.generic'),
   oracle: 'Oracle',
   mssql: 'SQL Server',
   mysql: 'MySQL',
   postgres: 'PostgreSQL',
-  auto: '自動判定',
+  auto: t('ui.auto'),
 };
 
 const PARSER_LABELS = {
@@ -87,7 +100,7 @@ function renderSeverityChips(container, counts) {
     }
   }
   if (!any) {
-    wrap.appendChild(el('span', { className: 'severity-chip ok', text: '危険の検出なし' }));
+    wrap.appendChild(el('span', { className: 'severity-chip ok', text: t('ui.noDanger') }));
   }
   container.appendChild(wrap);
   return wrap;
@@ -118,15 +131,15 @@ async function copyToClipboard(text, btn) {
       document.body.removeChild(ta);
     }
     const original = btn.textContent;
-    btn.textContent = 'コピーしました';
+    btn.textContent = t('ui.copied');
     btn.classList.add('copied');
     setTimeout(() => {
       btn.textContent = original;
       btn.classList.remove('copied');
     }, 1600);
   } catch (e) {
-    btn.textContent = 'コピーに失敗しました';
-    setTimeout(() => { btn.textContent = 'コピー'; }, 1600);
+    btn.textContent = t('ui.copyFailed');
+    setTimeout(() => { btn.textContent = t('ui.copy'); }, 1600);
   }
 }
 
@@ -136,20 +149,20 @@ async function copyToClipboard(text, btn) {
  * 注記の両方で明示する（生成SQL自体にも同内容のコメントが入っている）。
  */
 function renderVerifySelect(sql, hasJoin, hasRuntimeVariable) {
+  // 既定ロケール: 検算SELECT（実行前に対象件数を確認・JOINのため結合行数です）
+  // 既定ロケール: ※JOINを含むため結合行数です。1対多の結合では実際の更新行数より大きくなることがあります。
   const wrap = el('div', { className: 'verify-select' });
   const head = el('div', { className: 'verify-select-head' });
-  const labelText = hasJoin
-    ? '検算SELECT（実行前に対象件数を確認・JOINのため結合行数です）'
-    : '検算SELECT（実行前に対象件数を確認）';
+  const labelText = hasJoin ? t('ui.verifyJoin') : t('ui.verify');
   head.appendChild(el('span', { className: 'verify-select-label', text: labelText }));
-  const copyBtn = el('button', { className: 'btn btn-copy', text: 'コピー', attrs: { type: 'button' } });
+  const copyBtn = el('button', { className: 'btn btn-copy', text: t('ui.copy'), attrs: { type: 'button' } });
   copyBtn.addEventListener('click', () => copyToClipboard(sql, copyBtn));
   head.appendChild(copyBtn);
   wrap.appendChild(head);
   if (hasJoin) {
     wrap.appendChild(el('p', {
       className: 'verify-select-note',
-      text: '※JOINを含むため結合行数です。1対多の結合では実際の更新行数より大きくなることがあります。',
+      text: t('ui.verifyJoinNote'),
     }));
   }
   // PL/SQL内部から抽出したDMLは、WHERE句にPL/SQL変数やバインド変数が残る。
@@ -157,7 +170,7 @@ function renderVerifySelect(sql, hasJoin, hasRuntimeVariable) {
   if (hasRuntimeVariable) {
     wrap.appendChild(el('p', {
       className: 'verify-select-note',
-      text: '※WHERE句にPL/SQLの変数・バインド変数が含まれています。:変数 部分は実行時の値に置き換えてください。',
+      text: t('ui.verifyVariable'),
     }));
   }
   const pre = el('pre');
@@ -220,7 +233,7 @@ function renderHeadline(summary) {
 function renderSummary(summary) {
   const card = el('div', { className: 'stmt-summary' });
   const head = el('div', { className: 'summary-head' });
-  head.appendChild(el('span', { className: 'summary-label', text: 'このSQLがすること' }));
+  head.appendChild(el('span', { className: 'summary-label', text: t('ui.summaryLabel') }));
   head.appendChild(el('span', { className: 'summary-op', text: summary.op }));
   card.appendChild(head);
   card.appendChild(renderHeadline(summary));
@@ -235,11 +248,11 @@ function renderFallbackNotice(parse) {
   const line = parse.error && parse.error.globalLine != null
     ? parse.error.globalLine
     : (parse.error ? parse.error.line : null);
-  const where = line != null ? `（位置: 行${line}）` : '';
+  const where = line != null ? t('ui.position', { line }) : '';
   const note = el('div', { className: 'parse-notice' });
-  note.appendChild(el('span', { className: 'parse-notice-badge', text: '簡易チェック' }));
+  note.appendChild(el('span', { className: 'parse-notice-badge', text: t('ui.fallbackBadge') }));
   note.appendChild(el('span', {
-    text: `構文解析に失敗したため簡易チェックで表示しています${where}。日本語要約は表示されず、検出も正規表現ベースの簡易判定になります。`,
+    text: t('ui.fallbackNotice', { position: where }),
   }));
   return note;
 }
@@ -251,15 +264,17 @@ function renderFallbackNotice(parse) {
  * だったという事実を warning として必ず表示する（位置つき）。
  */
 function renderParserSwapNotice(parse, dialect) {
+  // 既定ロケールでは「⚠ 方言不一致」「選択した方言」「別方言」「参考表示」と案内する。
+  // 選択した方言では構文エラーです。このSQLは選択した方言では実行できない可能性があります。
   const selectedLabel = DIALECT_LABELS[dialect] || dialect;
   const fallbackLabel = PARSER_LABELS[parse.parserDialect] || parse.parserDialect;
   const err = parse.primaryError;
   const line = err && err.globalLine != null ? err.globalLine : (err ? err.line : null);
-  const where = line != null ? `（位置: 行${line}）` : '';
+  const where = line != null ? t('ui.position', { line }) : '';
   const note = el('div', { className: 'parse-notice parse-notice-warning' });
-  note.appendChild(el('span', { className: 'parse-notice-badge', text: '⚠ 方言不一致' }));
+  note.appendChild(el('span', { className: 'parse-notice-badge', text: t('ui.dialectMismatch') }));
   note.appendChild(el('span', {
-    text: `選択した方言（${selectedLabel}）では構文エラーです${where}。別方言（${fallbackLabel}）として解釈した参考表示です。このSQLは選択した方言では実行できない可能性があります。`,
+    text: t('ui.parserSwap', { selected: selectedLabel, fallback: fallbackLabel, position: where }),
   }));
   return note;
 }
@@ -295,7 +310,7 @@ function renderPlsqlItem(item, index, stmtNumber) {
 
   const headRow = el('div', { className: 'plsql-item-head' });
   const title = el('div', { className: 'stmt-title' });
-  title.appendChild(el('span', { className: 'stmt-number', text: `抽出 ${index + 1}` }));
+  title.appendChild(el('span', { className: 'stmt-number', text: t('ui.extracted', { number: index + 1 }) }));
   const labelText = item.cursorName ? `${item.label}: ${item.cursorName}` : item.label;
   title.appendChild(el('span', { className: 'stmt-kind', text: labelText }));
   headRow.appendChild(title);
@@ -312,8 +327,8 @@ function renderPlsqlItem(item, index, stmtNumber) {
     card.appendChild(list);
   } else {
     const note = el('div', { className: 'no-findings-note' });
-    note.appendChild(document.createTextNode('明らかな危険は検出されませんでした'));
-    const small = el('small', { text: '（検出できない危険もあります。最終判断は必ず人間が行ってください）' });
+    note.appendChild(document.createTextNode(t('ui.noDangerLong')));
+    const small = el('small', { text: t('ui.humanReview') });
     note.appendChild(small);
     card.appendChild(note);
   }
@@ -332,7 +347,7 @@ function renderPlsqlItem(item, index, stmtNumber) {
 /** PL/SQLユニットの構造サマリ（何が何個あって、DMLを何本抽出したか） */
 function renderPlsqlStructure(plsql) {
   const wrap = el('div', { className: 'plsql-structure' });
-  wrap.appendChild(el('p', { className: 'plsql-structure-head', text: `PL/SQLユニット: ${plsql.header}` }));
+  wrap.appendChild(el('p', { className: 'plsql-structure-head', text: t('ui.plsqlUnit', { header: plsql.header }) }));
   wrap.appendChild(el('p', { className: 'plsql-structure-line', text: plsql.structure }));
   return wrap;
 }
@@ -355,7 +370,7 @@ function renderStatementCard(stmt, dialect) {
 
   const headRow = el('div', { className: 'stmt-card-head' });
   const title = el('div', { className: 'stmt-title' });
-  title.appendChild(el('span', { className: 'stmt-number', text: `文 ${stmt.number}` }));
+  title.appendChild(el('span', { className: 'stmt-number', text: t('ui.statement', { number: stmt.number }) }));
   title.appendChild(el('span', { className: 'stmt-kind', text: KIND_LABELS[stmt.kind] || stmt.kind }));
   headRow.appendChild(title);
   renderSeverityChips(headRow, countBySeverity(headlineFindings));
@@ -385,8 +400,8 @@ function renderStatementCard(stmt, dialect) {
     card.appendChild(list);
   } else if (!stmt.plsql) {
     const note = el('div', { className: 'no-findings-note' });
-    note.appendChild(document.createTextNode('明らかな危険は検出されませんでした'));
-    const small = el('small', { text: '（検出できない危険もあります。最終判断は必ず人間が行ってください）' });
+    note.appendChild(document.createTextNode(t('ui.noDangerLong')));
+    const small = el('small', { text: t('ui.humanReview') });
     note.appendChild(small);
     card.appendChild(note);
   }
@@ -395,7 +410,7 @@ function renderStatementCard(stmt, dialect) {
     const list = el('div', { className: 'plsql-items' });
     list.appendChild(el('p', {
       className: 'plsql-items-title',
-      text: `抽出したDML（${stmt.plsql.items.length}件）— 1本ずつ通常の文と同じチェックをかけています`,
+      text: t('ui.extractedDml', { count: stmt.plsql.items.length }),
     }));
     stmt.plsql.items.forEach((item, i) => list.appendChild(renderPlsqlItem(item, i, stmt.number)));
     card.appendChild(list);
@@ -420,16 +435,14 @@ function renderStatementCard(stmt, dialect) {
 function buildAutoDetectReasonText(detection, resolvedLabel) {
   switch (detection.reason) {
     case 'heuristic':
-      return detection.markers.length > 0
-        ? detection.markers.join('・')
-        : `${resolvedLabel}らしい特徴`;
+      return t('ui.autoReason.heuristic', { markers: detection.markers.length > 0 ? detection.markers.join(I18n.getLocale() === 'en' ? ', ' : '・') : resolvedLabel });
     case 'parse-success-single':
-      return `方言固有のキーワードは見つかりませんでしたが、${resolvedLabel}のパーサで構文解析に成功しました`;
+      return t('ui.autoReason.single', { dialect: resolvedLabel });
     case 'parse-success-ambiguous':
-      return '複数方言のパーサで解析に成功したANSI互換SQLと判断し、MySQLとして扱っています（方言固有のヒントは表示していません）';
+      return t('ui.autoReason.ambiguous');
     case 'undetermined':
     default:
-      return '方言を特定できる手がかりが見つかりませんでした';
+      return t('ui.autoReason.unknown');
   }
 }
 
@@ -437,9 +450,9 @@ function renderAutoDialectNotice(detection, resolvedDialect) {
   const label = DIALECT_LABELS[resolvedDialect] || resolvedDialect;
   const reasonText = buildAutoDetectReasonText(detection, label);
   const wrap = el('div', { className: 'auto-dialect-notice' });
-  wrap.appendChild(el('span', { className: 'auto-dialect-badge', text: '自動判定' }));
+  wrap.appendChild(el('span', { className: 'auto-dialect-badge', text: t('ui.autoBadge') }));
   wrap.appendChild(el('span', {
-    text: `自動判定: ${label} として解析しました（根拠: ${reasonText}）。誤っている場合は方言を選び直してください`,
+    text: t('ui.autoNotice', { dialect: label, reason: reasonText }),
   }));
   return wrap;
 }
@@ -453,19 +466,17 @@ function renderAnalysisBadge(result) {
   const dialectLabel = DIALECT_LABELS[result.dialect] || result.dialect;
 
   if (result.analysis && result.analysis.astSupported) {
-    wrap.appendChild(el('span', { className: 'analysis-badge ast', text: '構文解析あり' }));
+    wrap.appendChild(el('span', { className: 'analysis-badge ast', text: t('ui.astBadge') }));
     const fb = result.analysis.fallbackStatements;
     wrap.appendChild(el('span', {
       className: 'analysis-note',
-      text: fb > 0
-        ? `${dialectLabel} のパーサでSQLを解析し、日本語で要約しています（${fb}文はパースできず簡易チェックに切り替えました）。`
-        : `${dialectLabel} のパーサでSQLを解析し、日本語で要約しています。`,
+      text: fb > 0 ? t('ui.astFallbackNote', { dialect: dialectLabel, count: fb }) : t('ui.astNote', { dialect: dialectLabel }),
     }));
   } else {
-    wrap.appendChild(el('span', { className: 'analysis-badge simple', text: '簡易チェック（構文解析なし）' }));
+    wrap.appendChild(el('span', { className: 'analysis-badge simple', text: t('ui.simpleBadge') }));
     wrap.appendChild(el('span', {
       className: 'analysis-note',
-      text: `${dialectLabel} は同梱パーサが対応していないため、正規表現ベースの簡易チェックのみを行います（日本語要約は表示されません）。MySQL / PostgreSQL / SQL Server を選ぶと構文解析付きで確認できます。`,
+      text: t('ui.simpleNote', { dialect: dialectLabel }),
     }));
   }
   return wrap;
@@ -485,9 +496,9 @@ function overviewCountsText(counts) {
     others += n;
   }
   for (const kind of OVERVIEW_KIND_ORDER) {
-    if (counts[kind]) parts.push(`${KIND_LABELS[kind] || kind} ${counts[kind]}件`);
+    if (counts[kind]) parts.push(t('ui.count', { label: KIND_LABELS[kind] || kind, count: counts[kind] }));
   }
-  if (others > 0) parts.push(`その他 ${others}件`);
+  if (others > 0) parts.push(t('ui.otherCount', { count: others }));
   return parts.join(' / ');
 }
 
@@ -496,36 +507,36 @@ function overviewCountsText(counts) {
 // 一覧・文の内訳」（＋構文解析できなかった文の一覧）に絞る。
 function renderOverview(overview) {
   const card = el('div', { className: 'overview-card' });
-  card.appendChild(el('h2', { className: 'overview-title', text: 'スクリプトの内訳' }));
+  card.appendChild(el('h2', { className: 'overview-title', text: t('ui.overviewTitle') }));
 
   card.appendChild(el('p', {
     className: 'overview-line',
-    text: `全${overview.total}文（${overviewCountsText(overview.counts)}）。うち破壊的操作は ${overview.destructiveCount}件です。`,
+    text: t('ui.overviewLine', { total: overview.total, counts: overviewCountsText(overview.counts), destructive: overview.destructiveCount }),
   }));
 
   card.appendChild(el('p', {
     className: 'overview-line',
     text: overview.tables.length > 0
-      ? `触るテーブル: ${overview.tables.join(' / ')}`
-      : '触るテーブル: 特定できませんでした',
+      ? t('ui.tables', { tables: overview.tables.join(' / ') })
+      : t('ui.tablesUnknown'),
   }));
 
   if (overview.fallbackStatements.length > 0) {
     card.appendChild(el('p', {
       className: 'overview-line',
-      text: `構文解析できず簡易チェックになった文: ${overview.fallbackStatements.map((n) => `#${n}`).join(', ')}`,
+      text: t('ui.fallbackStatements', { statements: overview.fallbackStatements.map((n) => `#${n}`).join(', ') }),
     }));
   }
 
   if (overview.unanalyzedStatements.length > 0) {
     const line = el('p', { className: 'overview-line overview-warned' });
-    line.appendChild(document.createTextNode(`⚠ 未解析の文: ${overview.unanalyzedStatements.length}件（`));
+    line.appendChild(document.createTextNode(t('ui.unanalyzedStart', { count: overview.unanalyzedStatements.length })));
     overview.unanalyzedStatements.forEach((num, i) => {
       if (i > 0) line.appendChild(document.createTextNode(', '));
       const a = el('a', { className: 'overview-link', text: `#${num}`, attrs: { href: `#stmt-${num}` } });
       line.appendChild(a);
     });
-    line.appendChild(document.createTextNode('）。MERGE等の未対応構文や、DMLを1本も抽出できなかったPL/SQLブロックなどは、チェックが行われていません。目視で確認してください。'));
+    line.appendChild(document.createTextNode(t('ui.unanalyzedEnd')));
     card.appendChild(line);
   }
 
@@ -564,13 +575,13 @@ function computeVerdict(result) {
   for (const stmt of result.statements) {
     for (const f of stmt.findings) {
       counts[f.severity]++;
-      addJump(f.severity, `文${stmt.number}`, `#stmt-${stmt.number}`);
+      addJump(f.severity, t('ui.jumpStatement', { number: stmt.number }), `#stmt-${stmt.number}`);
     }
     if (stmt.plsql) {
       stmt.plsql.items.forEach((item, i) => {
         for (const f of item.findings) {
           counts[f.severity]++;
-          addJump(f.severity, `文${stmt.number}-抽出${i + 1}`, `#stmt-${stmt.number}-item-${i + 1}`);
+          addJump(f.severity, t('ui.jumpExtracted', { number: stmt.number, item: i + 1 }), `#stmt-${stmt.number}-item-${i + 1}`);
         }
       });
     }
@@ -588,7 +599,7 @@ function renderVerdictJumpLine(labelPrefix, jumps) {
   line.appendChild(document.createTextNode(labelPrefix));
   let i = 0;
   for (const [label, anchor] of jumps) {
-    if (i > 0) line.appendChild(document.createTextNode('・'));
+    if (i > 0) line.appendChild(document.createTextNode(I18n.getLocale() === 'en' ? ', ' : '・'));
     line.appendChild(el('a', { className: 'verdict-jump-link', text: label, attrs: { href: anchor } }));
     i++;
   }
@@ -609,33 +620,33 @@ function renderVerdictBanner(result) {
   const headline = el('p', { className: 'verdict-headline' });
   const segs = [];
   if (level === 'danger') {
-    segs.push(`🔴 危険 ${counts.danger}件`);
-    segs.push(`⚠ 注意 ${counts.warning}件`);
-    segs.push(`情報 ${counts.info}件`);
+    segs.push(t('ui.verdictDanger', { count: counts.danger }));
+    segs.push(t('ui.verdictWarning', { count: counts.warning }));
+    segs.push(t('ui.verdictInfo', { count: counts.info }));
   } else if (level === 'warning') {
-    segs.push(`⚠ 注意 ${counts.warning}件`);
-    segs.push(`情報 ${counts.info}件`);
+    segs.push(t('ui.verdictWarning', { count: counts.warning }));
+    segs.push(t('ui.verdictInfo', { count: counts.info }));
   } else {
-    segs.push(`明らかな危険は検出されませんでした（情報 ${counts.info}件）`);
+    segs.push(t('ui.verdictNeutral', { count: counts.info }));
   }
-  headline.textContent = segs.join(' ／ ');
+  headline.textContent = segs.join(I18n.getLocale() === 'en' ? ' / ' : ' ／ ');
   wrap.appendChild(headline);
 
   if (level === 'danger') {
     wrap.appendChild(el('p', {
       className: 'verdict-subtext verdict-subtext-strong',
-      text: '実行前に危険箇所の確認が必要です。',
+      text: t('ui.verdictAction'),
     }));
   } else if (level === 'neutral') {
     // 過信防止文言（about-panelのdisclaimerと同じ趣旨をバナー内にも明示する）
     wrap.appendChild(el('p', {
       className: 'verdict-subtext',
-      text: '「危険が検出されない = 安全」ではありません。検出できない危険もあります。最終判断は必ず人間が行ってください。',
+      text: t('ui.verdictDisclaimer'),
     }));
   }
 
-  if (dangerJumps.size > 0) wrap.appendChild(renderVerdictJumpLine('危険: ', dangerJumps));
-  if (warningJumps.size > 0) wrap.appendChild(renderVerdictJumpLine('注意: ', warningJumps));
+  if (dangerJumps.size > 0) wrap.appendChild(renderVerdictJumpLine(`${t('ui.severity.danger')}: `, dangerJumps));
+  if (warningJumps.size > 0) wrap.appendChild(renderVerdictJumpLine(`${t('ui.severity.warning')}: `, warningJumps));
 
   return wrap;
 }
@@ -654,7 +665,7 @@ function render() {
   els.results.innerHTML = '';
 
   if (!sql || sql.trim().length === 0) {
-    els.results.appendChild(el('p', { className: 'empty-state', text: 'SQLを貼り付けると、ここに解析結果が表示されます。' }));
+    els.results.appendChild(el('p', { className: 'empty-state', text: t('ui.empty') }));
     return;
   }
 
@@ -672,7 +683,7 @@ function render() {
   const result = analyzeSQL(sql, dialect);
 
   if (result.statements.length === 0) {
-    els.results.appendChild(el('p', { className: 'empty-state', text: '有効なSQL文が見つかりませんでした。' }));
+    els.results.appendChild(el('p', { className: 'empty-state', text: t('ui.noValidSql') }));
     return;
   }
 

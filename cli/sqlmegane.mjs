@@ -28,6 +28,7 @@ import { fileURLToPath } from 'node:url';
 
 // js/*.js は file:// 直開き対応のため ESM export を使わず globalThis に公開する
 // 通常スクリプト。index.html と同じ順序で副作用インポートする（tests/run-tests.mjs と同じ方式）。
+import '../js/i18n.js';
 import '../js/vendor/node-sql-parser-mysql.js';
 import '../js/vendor/node-sql-parser-postgresql.js';
 import '../js/vendor/node-sql-parser-transactsql.js';
@@ -41,6 +42,8 @@ import '../js/dialect-detect.js';
 const { analyzeSQL, SEVERITY_ORDER } = globalThis.SQLMeganeAnalyzer;
 const { summaryToLines } = globalThis.SQLMeganeSummarizer;
 const { detectDialect } = globalThis.SQLMeganeDialectDetect;
+const I18n = globalThis.SQLMeganeI18n;
+const t = (key, params) => I18n.t(key, params);
 
 const DIALECTS = ['auto', 'generic', 'mysql', 'postgres', 'mssql', 'oracle'];
 const FAIL_ON = ['danger', 'warning', 'info', 'never'];
@@ -52,10 +55,12 @@ class InputError extends Error {}
 
 function usageText() {
   const me = path.basename(fileURLToPath(import.meta.url));
+  if (I18n.getLocale() === 'en') return t('cli.usage', { name: me, max: DEFAULT_MAX_BYTES });
   return [
     `使い方: node cli/${me} [オプション] [--] [ファイル.sql | -]`,
     '',
     '  --dialect <auto|generic|mysql|postgres|mssql|oracle>  方言（既定: auto）',
+    '  --lang <ja|en>                                        出力言語（既定: ja）',
     '  --json                                                 JSON で出力',
     '  --fail-on <danger|warning|info|never>                  終了コード 2 にする重要度の閾値（既定: danger）',
     '  --include-sql                                          出力に SQL 全文を含める（既定: 含めない）',
@@ -68,10 +73,10 @@ function usageText() {
 }
 
 function parseArgs(argv) {
-  const opts = { dialect: 'auto', json: false, failOn: 'danger', includeSql: false, maxBytes: DEFAULT_MAX_BYTES, file: null, help: false };
+  const opts = { dialect: 'auto', lang: 'ja', json: false, failOn: 'danger', includeSql: false, maxBytes: DEFAULT_MAX_BYTES, file: null, help: false };
   const takeValue = (name, i) => {
     const v = argv[i + 1];
-    if (v === undefined || (v.startsWith('-') && v !== '-')) throw new UsageError(`${name} には値が必要です。`);
+    if (v === undefined || (v.startsWith('-') && v !== '-')) throw new UsageError(I18n.getLocale() === 'en' ? t('cli.err.value', { option: name }) : `${name} には値が必要です。`);
     return v;
   };
   let positionalOnly = false;
@@ -79,24 +84,27 @@ function parseArgs(argv) {
     const a = argv[i];
     if (!positionalOnly && a === '--') { positionalOnly = true; continue; }
     if (!positionalOnly && a.startsWith('-') && a !== '-') {
-      if (a === '-h' || a === '--help') { opts.help = true; return opts; }
+      if (a === '-h' || a === '--help') opts.help = true;
       else if (a === '--json') opts.json = true;
       else if (a === '--include-sql') opts.includeSql = true;
       else if (a === '--dialect') opts.dialect = takeValue(a, i++);
       else if (a.startsWith('--dialect=')) opts.dialect = a.slice('--dialect='.length);
+      else if (a === '--lang') { opts.lang = takeValue(a, i++); I18n.setLocale(opts.lang); }
+      else if (a.startsWith('--lang=')) { opts.lang = a.slice('--lang='.length); I18n.setLocale(opts.lang); }
       else if (a === '--fail-on') opts.failOn = takeValue(a, i++);
       else if (a.startsWith('--fail-on=')) opts.failOn = a.slice('--fail-on='.length);
       else if (a === '--max-bytes') opts.maxBytes = Number(takeValue(a, i++));
       else if (a.startsWith('--max-bytes=')) opts.maxBytes = Number(a.slice('--max-bytes='.length));
-      else throw new UsageError(`不明なオプション: ${a}`);
+      else throw new UsageError(I18n.getLocale() === 'en' ? t('cli.err.option', { option: a }) : `不明なオプション: ${a}`);
       continue;
     }
-    if (opts.file !== null) throw new UsageError('ファイルは 1 つだけ指定してください。');
+    if (opts.file !== null) throw new UsageError(I18n.getLocale() === 'en' ? t('cli.err.file') : 'ファイルは 1 つだけ指定してください。');
     opts.file = a;
   }
-  if (!DIALECTS.includes(opts.dialect)) throw new UsageError(`--dialect は ${DIALECTS.join(' / ')} のいずれかです: ${opts.dialect}`);
-  if (!FAIL_ON.includes(opts.failOn)) throw new UsageError(`--fail-on は ${FAIL_ON.join(' / ')} のいずれかです: ${opts.failOn}`);
-  if (!Number.isInteger(opts.maxBytes) || opts.maxBytes <= 0) throw new UsageError('--max-bytes は正の整数で指定してください。');
+  if (!DIALECTS.includes(opts.dialect)) throw new UsageError(I18n.getLocale() === 'en' ? t('cli.err.dialect', { values: DIALECTS.join(', '), value: opts.dialect }) : `--dialect は ${DIALECTS.join(' / ')} のいずれかです: ${opts.dialect}`);
+  if (!I18n.locales.includes(opts.lang)) throw new UsageError(I18n.getLocale() === 'en' ? t('cli.err.lang') : '--lang は ja / en のいずれかです。');
+  if (!FAIL_ON.includes(opts.failOn)) throw new UsageError(I18n.getLocale() === 'en' ? t('cli.err.failOn', { values: FAIL_ON.join(', '), value: opts.failOn }) : `--fail-on は ${FAIL_ON.join(' / ')} のいずれかです: ${opts.failOn}`);
+  if (!Number.isInteger(opts.maxBytes) || opts.maxBytes <= 0) throw new UsageError(I18n.getLocale() === 'en' ? t('cli.err.maxBytes') : '--max-bytes は正の整数で指定してください。');
   return opts;
 }
 
@@ -114,9 +122,9 @@ async function readInput(file, maxBytes) {
     try {
       size = fs.statSync(file).size;
     } catch (err) {
-      throw new InputError(`読み込みに失敗しました: ${err.code || err.message}`);
+      throw new InputError(I18n.getLocale() === 'en' ? t('cli.err.read', { message: err.code || err.message }) : `読み込みに失敗しました: ${err.code || err.message}`);
     }
-    if (size > maxBytes) throw new InputError(`入力が上限（${maxBytes} バイト）を超えています（${size} バイト）。--max-bytes で上限を変更できます。`);
+    if (size > maxBytes) throw new InputError(I18n.getLocale() === 'en' ? t('cli.err.size', { max: maxBytes }) : `入力が上限（${maxBytes} バイト）を超えています（${size} バイト）。--max-bytes で上限を変更できます。`);
     stream = fs.createReadStream(file);
   }
   const chunks = [];
@@ -127,13 +135,13 @@ async function readInput(file, maxBytes) {
       total += buf.length;
       if (total > maxBytes) {
         if (typeof stream.destroy === 'function') stream.destroy();
-        throw new InputError(`入力が上限（${maxBytes} バイト）を超えています。--max-bytes で上限を変更できます。`);
+        throw new InputError(I18n.getLocale() === 'en' ? t('cli.err.size', { max: maxBytes }) : `入力が上限（${maxBytes} バイト）を超えています。--max-bytes で上限を変更できます。`);
       }
       chunks.push(buf);
     }
   } catch (err) {
     if (err instanceof InputError) throw err;
-    throw new InputError(`読み込みに失敗しました: ${err.code || err.message}`);
+    throw new InputError(I18n.getLocale() === 'en' ? t('cli.err.read', { message: err.code || err.message }) : `読み込みに失敗しました: ${err.code || err.message}`);
   }
   return Buffer.concat(chunks).toString('utf8');
 }
@@ -214,10 +222,39 @@ function allFindings(plain) {
 }
 
 function findingLine(f) {
-  return `${SEVERITY_LABEL[f.severity] || `[${f.severity}]`}${f.title}: ${f.message}`;
+  const label = I18n.getLocale() === 'en' ? t(`cli.severity.${f.severity}`) : (SEVERITY_LABEL[f.severity] || `[${f.severity}]`);
+  return `${label}${f.title}: ${f.message}`;
 }
 
 function renderText(plain, detected, includeSql) {
+  if (I18n.getLocale() === 'en') {
+    const out = [];
+    out.push(t('cli.dialect', { dialect: plain.dialect, detected: detected ? t('cli.detected', { reason: detected.reason }) : '', count: plain.statements.length }));
+    for (const st of plain.statements) {
+      out.push('', t('cli.statement', { number: st.number, kind: st.kind }));
+      if (includeSql && st.raw) out.push(`SQL: ${st.raw}`);
+      if (st.summary && st.summary.length) out.push(...st.summary);
+      else out.push(t('cli.noSummary'));
+      for (const f of st.findings) out.push(findingLine(f));
+      if (st.verifySelect) out.push(t('cli.verify', { sql: st.verifySelect }));
+      if (st.plsql) {
+        const p = st.plsql;
+        out.push(t('cli.plsql', { header: [p.unitKind, p.unitName].filter(Boolean).join(' ') }));
+        for (const [index, item] of p.items.entries()) {
+          out.push(t('cli.extracted', { number: index + 1, kind: item.kind, label: item.label || item.kind }));
+          if (includeSql && item.sql) out.push(`  SQL: ${item.sql}`);
+          if (item.summary) for (const line of item.summary) out.push(`  ${line}`);
+          for (const f of item.findings) out.push(`  ${findingLine(f)}`);
+          if (item.verifySelect) out.push(`  ${t('cli.verify', { sql: item.verifySelect })}${item.verifySelectHasRuntimeVariable ? t('cli.runtimeVariable') : ''}`);
+        }
+      }
+    }
+    if (plain.globalFindings && plain.globalFindings.length) {
+      out.push('', t('cli.overall'));
+      for (const f of plain.globalFindings) out.push(findingLine(f));
+    }
+    return out.join('\n') + '\n';
+  }
   const out = [];
   const dialectNote = detected ? `${plain.dialect}（自動判定: ${detected.reason}）` : plain.dialect;
   out.push(`方言: ${dialectNote}　文の数: ${plain.statements.length}`);
@@ -268,6 +305,7 @@ async function main() {
   let opts;
   try {
     opts = parseArgs(process.argv.slice(2));
+    I18n.setLocale(opts.lang);
   } catch (err) {
     if (err instanceof UsageError) {
       process.stderr.write(err.message + '\n' + usageText());
@@ -285,12 +323,13 @@ async function main() {
   try {
     sql = await readInput(opts.file, opts.maxBytes);
   } catch (err) {
-    process.stderr.write((err instanceof InputError ? err.message : `読み込みに失敗しました: ${err.code || err.message}`) + '\n');
+    const message = err instanceof InputError ? err.message : (I18n.getLocale() === 'en' ? `Failed to read input: ${err.code || err.message}` : `読み込みに失敗しました: ${err.code || err.message}`);
+    process.stderr.write(message + '\n');
     process.exitCode = 1;
     return;
   }
   if (!sql.trim()) {
-    process.stderr.write('SQL が空です。\n');
+    process.stderr.write((I18n.getLocale() === 'en' ? t('cli.err.empty') : 'SQL が空です。') + '\n');
     process.exitCode = 1;
     return;
   }

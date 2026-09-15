@@ -235,7 +235,8 @@ DELETE: `t_log` の全行を削除します
 
 ```
 sqlmegane/
-├── index.html            UI本体（vendor → sql-ast → summarizer → ast-rules → plsql-extract → analyzer → app の順に読み込む）
+├── index.html            日本語UI本体（i18n → vendor → sql-ast → summarizer → ast-rules → plsql-extract → analyzer → dialect-detect → app の順に読み込む）
+├── en/index.html         英語UI（同じスクリプトを同じ順序で読み込む）
 ├── css/style.css         スタイル（ダーク基調）
 ├── js/vendor/            同梱サードパーティ（実行時の外部読み込みは一切なし）
 │   ├── node-sql-parser-mysql.js        node-sql-parser 5.4.0 UMD（MySQL方言）
@@ -244,6 +245,8 @@ sqlmegane/
 │   └── LICENSE-node-sql-parser         Apache-2.0 ライセンス全文
 ├── js/sql-ast.js         同梱パーサのラッパーとAST共通ヘルパー（方言マッピング、フォールバック、
 │                          AND/OR優先順位の正規化）
+├── js/i18n.js            日本語・英語のメッセージ辞書とロケール選択（globalThis.SQLMeganeI18n）
+- `tools/build-en.mjs`: `en/index.html` を `index.html` と `js/i18n.js` の英語メッセージから生成する（英語ページを直接編集しない。`node tools/build-en.mjs`）
 ├── js/summarizer.js      日本語要約の生成（v2の主役。表示用データを返すだけでDOMは触らない）
 ├── js/ast-rules.js       AST基盤の検出ルール（既存ルールのAST版 + 新ルール3種）
 ├── js/plsql-extract.js   PL/SQLの構造認識と埋め込みDMLの抽出（Oracle対応 Phase 1）。

@@ -23,29 +23,29 @@
     <div class="brand">
       <span class="brand-mark" aria-hidden="true">👓</span>
       <div>
-        <h1 class="brand-name">SQLMegane <span class="brand-suffix">SQLめがね</span></h1>
-        <p class="brand-tagline">本番SQLの実行前チェック。WHERE忘れ・全件更新に、日本語で読み返して気づく</p>
+        <h1 class="brand-name">SQLMegane <span class="brand-suffix" data-i18n="ui.brandSuffix">SQLめがね</span></h1>
+        <p class="brand-tagline" data-i18n="ui.tagline">本番SQLの実行前チェック。WHERE忘れ・全件更新に、日本語で読み返して気づく</p>
       </div>
     </div>
-    <span class="badge badge-proto">試作品（プロトタイプ）</span>
+    <div><a href="en/" lang="en" data-i18n="ui.langLink">English</a> <span class="badge badge-proto" data-i18n="ui.prototype">試作品（プロトタイプ）</span></div>
   </div>
 </header>
 
 <main class="container">
 
-  <section class="privacy-banner" aria-label="プライバシーについて">
+  <section class="privacy-banner" aria-label="プライバシーについて" data-i18n-aria="ui.privacyAria">
     <span class="privacy-icon" aria-hidden="true">🔒</span>
-    <p>入力されたSQLは<strong>ブラウザ内でのみ処理</strong>され、外部へ一切送信されません。サーバーもインストールも不要です。</p>
+    <p data-i18n="ui.privacy">入力されたSQLは<strong>ブラウザ内でのみ処理</strong>され、外部へ一切送信されません。サーバーもインストールも不要です。</p>
   </section>
 
   <section class="panel input-panel">
     <div class="input-panel-head">
-      <label for="sql-input" class="panel-title">チェックしたいSQLを貼り付け</label>
+      <label for="sql-input" class="panel-title" data-i18n="ui.inputLabel">チェックしたいSQLを貼り付け</label>
       <div class="dialect-select-wrap">
-        <label for="dialect-select">方言</label>
+        <label for="dialect-select" data-i18n="ui.dialect">方言</label>
         <select id="dialect-select">
-          <option value="auto" selected>自動判定</option>
-          <option value="generic">汎用</option>
+          <option value="auto" selected data-i18n="ui.auto">自動判定</option>
+          <option value="generic" data-i18n="ui.generic">汎用</option>
           <option value="oracle">Oracle</option>
           <option value="mssql">SQL Server</option>
           <option value="mysql">MySQL</option>
@@ -60,23 +60,25 @@
       spellcheck="false"
       autocomplete="off"
       autocapitalize="off"
+      data-i18n="ui.placeholder"
+      data-i18n-attr="placeholder"
       placeholder="例: UPDATE orders SET status = 'shipped' WHERE id = 42;&#10;&#10;複数文をまとめて貼り付け可能です（セミコロン区切り）。"
     ></textarea>
 
     <div class="input-panel-actions">
-      <button id="analyze-btn" type="button" class="btn btn-primary">解析する</button>
-      <button id="clear-btn" type="button" class="btn btn-ghost">クリア</button>
-      <span id="auto-analyze-hint" class="hint">入力中も自動でチェックします</span>
+      <button id="analyze-btn" type="button" class="btn btn-primary" data-i18n="ui.analyze">解析する</button>
+      <button id="clear-btn" type="button" class="btn btn-ghost" data-i18n="ui.clear">クリア</button>
+      <span id="auto-analyze-hint" class="hint" data-i18n="ui.autoHint">入力中も自動でチェックします</span>
     </div>
   </section>
 
   <section id="results" class="results" aria-live="polite">
-    <p class="empty-state">SQLを貼り付けると、ここに解析結果が表示されます。</p>
+    <p class="empty-state" data-i18n="ui.empty">SQLを貼り付けると、ここに解析結果が表示されます。</p>
   </section>
 
   <section class="about-panel">
-    <h2>これは何？</h2>
-    <p>
+    <h2 data-i18n="ui.aboutTitle">これは何？</h2>
+    <p data-i18n="ui.aboutIntro" data-i18n-html="true">
       本番データベースに手作業でUPDATE/DELETEを実行する前に、SQLを貼り付けるだけで
       <strong>「このSQLが何をするか」を日本語で読み返せる</strong>ツールです。
       操作対象・WHERE条件・JOINで残る行と落ちる行を日本語で書き下し、あわせて
@@ -84,13 +86,13 @@
       定番の事故パターンを検出します。組織への導入やアカウント登録は不要で、
       このページを開くだけで使えます。
     </p>
-    <p>
+    <p data-i18n="ui.aboutParser" data-i18n-html="true">
       MySQL / PostgreSQL / SQL Server を選んだ場合は、ページに同梱したSQLパーサで
       構文解析（AST）を行い、日本語要約とAST基盤の検出を表示します。
       Oracle・汎用を選んだ場合、および構文解析に失敗した場合は、
       従来の正規表現ベースの<strong>簡易チェック</strong>に切り替わります（画面上に明示されます）。
     </p>
-    <p>
+    <p data-i18n="ui.aboutPlsql" data-i18n-html="true">
       PL/SQL（<code>CREATE OR REPLACE PACKAGE / PROCEDURE / FUNCTION / TRIGGER</code>、
       <code>DECLARE</code>・<code>BEGIN 〜 END; /</code>）を貼り付けた場合は、ブロックの構造を読み取って
       <strong>中に埋め込まれたDML（INSERT / UPDATE / DELETE / MERGE / SELECT INTO・カーソル定義）を1本ずつ取り出し</strong>、
@@ -99,7 +101,7 @@
       どのDMLが実際に何回実行されるか、例外時に何がロールバックされるかは判断していないため、
       抽出したDML単位の簡易チェックとして読んでください。
     </p>
-    <p class="disclaimer">
+    <p class="disclaimer" data-i18n="ui.aboutDisclaimer" data-i18n-html="true">
       これは需要検証のための<strong>試作品（プロトタイプ）</strong>です。
       構文解析に成功した場合でも、意味論のすべてを検査できるわけではありません。
       <strong>「危険が検出されない = 安全」ではありません。</strong>
@@ -108,28 +110,28 @@
   </section>
 
   <section class="team-cta">
-    <h2>チーム版に興味はありますか？</h2>
-    <p>
+    <h2 data-i18n="ui.ctaTitle">チーム版に興味はありますか？</h2>
+    <p data-i18n="ui.ctaIntro">
       CI/CD連携によるプルリクエスト時の自動チェック、ルールのカスタマイズ、
       レビュー履歴の保存・共有など、チーム運用向けの機能を検討中です。
       興味がある方・ご意見のある方は、GitHubのDiscussionsで教えてください。
       現在のSQLMeganeについての質問・要望も歓迎します。
       「使ってみたけど合わなかった」「既存の方法で足りている」という声も、同じくらい参考になります。
     </p>
-    <p>
+    <p data-i18n="ui.ctaIssues">
       誤検知・検出漏れの報告はIssueで歓迎します。特に誤検知の報告はお待ちしています
       （検出漏れより誤検知のほうが、ツールへの信頼を早く壊すため）。
     </p>
-    <a class="btn btn-primary cta-issue-link" href="https://github.com/selene-nyx-ai/sqlmegane/discussions/1" target="_blank" rel="noopener">質問・要望はこちら</a>
-    <a class="btn btn-ghost cta-issue-link" href="https://github.com/selene-nyx-ai/sqlmegane/discussions/2" target="_blank" rel="noopener">使わない・合わない理由を教える</a>
-    <a class="btn btn-ghost cta-issue-link" href="https://github.com/selene-nyx-ai/sqlmegane/issues" target="_blank" rel="noopener">誤検知・検出漏れを報告（Issue）</a>
+    <a class="btn btn-primary cta-issue-link" href="https://github.com/selene-nyx-ai/sqlmegane/discussions/1" target="_blank" rel="noopener"><span data-i18n="ui.ctaQuestions">質問・要望はこちら</span></a>
+    <a class="btn btn-ghost cta-issue-link" href="https://github.com/selene-nyx-ai/sqlmegane/discussions/2" target="_blank" rel="noopener"><span data-i18n="ui.ctaFeedback">使わない・合わない理由を教える</span></a>
+    <a class="btn btn-ghost cta-issue-link" href="https://github.com/selene-nyx-ai/sqlmegane/issues" target="_blank" rel="noopener"><span data-i18n="ui.ctaBug">誤検知・検出漏れを報告（Issue）</span></a>
   </section>
 
 </main>
 
 <footer class="site-footer">
   <div class="container">
-    <p>SQLMegane（SQLめがね）は需要検証中のプロトタイプです。データの保存・送信は行われません。すべての処理はこの端末のブラウザ内で完結します。</p>
+    <p data-i18n="ui.footer">SQLMegane（SQLめがね）は需要検証中のプロトタイプです。データの保存・送信は行われません。すべての処理はこの端末のブラウザ内で完結します。</p>
   </div>
 </footer>
 
@@ -138,6 +140,7 @@
   js/vendor/ に同梱したものを <script> で読み込む（file:// 直開きでも動くように）。
   ライセンス全文: js/vendor/LICENSE-node-sql-parser
 -->
+<script src="js/i18n.js"></script>
 <script src="js/vendor/node-sql-parser-mysql.js"></script>
 <script src="js/vendor/node-sql-parser-postgresql.js"></script>
 <script src="js/vendor/node-sql-parser-transactsql.js"></script>
