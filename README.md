@@ -36,7 +36,7 @@ node cli/sqlmegane.mjs --dialect mysql --json 実行予定.sql
 - `--dialect auto|generic|mysql|postgres|mssql|oracle`（既定 `auto` = 自動判定）
 - `--json` で解析結果を JSON 出力（AST は含みません）
 - `--fail-on danger|warning|info|never`（既定 `danger`）: この重要度以上の指摘があると **終了コード 2** で終わります。CI やフック側でこの終了コードを判定すれば、検出した danger がある場合に後続処理を止められます（CLI 自体は SQL を実行も阻止もしません）
-- `--include-sql`: 出力に SQL 本文（`raw` / PL/SQL 内の `sql`）を含めます。既定では含めません。要約や検算SELECT にはテーブル名やリテラルが現れるので、**出力には SQL の内容の一部が含まれ得ます**。CI ログの閲覧範囲に注意してください
+- `--include-sql`: 出力に SQL の全文（`raw` / PL/SQL 内の `sql`）を含めます。既定では含めません。ただし要約・指摘・検算SELECT には、テーブル名・列名・WHERE 句の条件やリテラル（メールアドレスや ID など）がそのまま現れます。**既定でも出力には SQL の内容の一部が含まれる**ので、CI ログの閲覧範囲に注意してください
 - `--max-bytes N`（既定 5 MiB）: 入力の上限。超えると終了コード 1
 - PL/SQL（Oracle）のブロック内にある DML も、要約・指摘・検算SELECT を出し、終了コードの判定に含めます
 - 検出できるのは実装済みのルール（下の「検出ルール一覧」）に限られます。未検出の危険や warning 以下の指摘は既定では通過するので、**SQL の安全性を保証するものではありません**

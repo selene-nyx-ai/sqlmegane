@@ -2330,6 +2330,13 @@ test('CLI: 自動判定が曖昧（ANSI 互換）なら mysql-no-limit を落と
   assert.ok(mysql.statements[0].findings.some((f) => f.code === 'mysql-no-limit'));
 });
 
+test('CLI: テキスト出力でも --include-sql で SQL 全文が出る（PL/SQL 内の sql も）', () => {
+  const r = runCli(['--dialect', 'mysql', '--include-sql', '-'], 'DELETE FROM t_log WHERE id = 1;');
+  assert.ok(r.stdout.includes('SQL: DELETE FROM t_log WHERE id = 1'), r.stdout);
+  const p = runCli(['--dialect', 'oracle', '--include-sql', '-'], ['BEGIN', '  DELETE FROM t_log WHERE id = 1;', 'END;', '/'].join(String.fromCharCode(10)));
+  assert.ok(p.stdout.includes('  SQL: DELETE FROM t_log WHERE id = 1'), p.stdout);
+});
+
 test('CLI: 既定では SQL 本文（raw）を出力に含めず、--include-sql で含める', () => {
   const sql = "DELETE FROM t_log WHERE note = 'literal-marker-xyz';";
   const a = JSON.parse(runCli(['--json', '--dialect', 'mysql', '-'], sql).stdout);
