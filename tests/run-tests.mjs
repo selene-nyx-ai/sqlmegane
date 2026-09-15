@@ -2446,9 +2446,8 @@ test('en/index.html は英語が静的に焼き込まれ、インラインスク
   assert.ok(!html.includes('SQLMEGANE_LOCALE'), 'インラインスクリプトでロケールを渡していない（CSP と両立させるため data-locale を使う）');
   const jp = /[぀-ヿ㐀-鿿]/;
   const body = html.slice(html.indexOf('<body'));
-  const jpLines = body.split('
-').filter((l) => jp.test(l) && !/^\s*(<!--|[^<]*-->|同梱パーサ|js\/vendor|ライセンス)/.test(l));
-  assert.deepEqual(jpLines.map((l) => l.trim().slice(0, 40)), ['<div><a href="../" lang="ja" data-i18n="u'], '日本語が残るのは日本語ページへのリンクだけ');
+  const jpLines = body.split(String.fromCharCode(10)).filter((l) => jp.test(l) && !/^\s*(<!--|[^<]*-->|同梱パーサ|js\/vendor|ライセンス)/.test(l));
+  assert.deepEqual(jpLines.map((l) => l.trim().slice(0, 40)), ['<div><a href="../" lang="ja" data-i18n="'], '日本語が残るのは日本語ページへのリンクだけ');
 });
 
 // ---------------------------------------------------------------------------
