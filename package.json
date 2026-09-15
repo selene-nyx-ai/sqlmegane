@@ -6,6 +6,10 @@
   "type": "module",
   "scripts": {
     "test": "node tests/run-tests.mjs",
-    "build:vendor": "npm install --no-save node-sql-parser && node tools/build-vendor.mjs"
+    "build:vendor": "npm install --no-save node-sql-parser && node tools/build-vendor.mjs",
+    "cli": "node cli/sqlmegane.mjs"
+  },
+  "bin": {
+    "sqlmegane": "cli/sqlmegane.mjs"
   }
 }

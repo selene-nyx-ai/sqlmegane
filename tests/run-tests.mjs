@@ -589,10 +589,10 @@ test('index.htmlはCSP metaタグを持ち、想定のディレクティブを�
   assert.match(csp, /form-action 'none'/);
 });
 
-test('index.htmlはCTAフォームを持たず、GitHub IssueへのリンクをCTAとして持つ', () => {
+test('index.htmlはCTAフォームを持たず、GitHub Discussions へのリンクをCTAとして持つ（2026-09-11 に Issue → Discussions/1 に変更）', () => {
   const html = readProjectFile('index.html');
   assert.ok(!/<form/.test(html), 'CTA用のformが残っています');
-  assert.match(html, /<a class="btn btn-primary cta-issue-link" href="https:\/\/github\.com\/selene-nyx-ai\/sqlmegane\/issues" target="_blank" rel="noopener">/);
+  assert.match(html, /<a class="btn btn-primary cta-issue-link" href="https:\/\/github\.com\/selene-nyx-ai\/sqlmegane\/discussions\/1" target="_blank" rel="noopener">/);
   const appJs = readProjectFile('js/app.js');
   assert.ok(!/ctaForm/.test(appJs), 'app.jsにctaFormへの参照が残っています');
 });
@@ -2253,6 +2253,118 @@ test('機能B: PL/SQLユニット構造だけでもoracleのマーカーとし�
   const d = detectDialect(sql);
   assert.equal(d.dialect, 'oracle');
   assert.ok(d.markers.includes('PL/SQLユニット構造'));
+});
+
+// ---------------------------------------------------------------------------
+// CLI（cli/sqlmegane.mjs）: ブラウザ版と同じコアを Node から呼ぶ入口
+// ---------------------------------------------------------------------------
+
+import { spawnSync } from 'node:child_process';
+const CLI = path.join(projectRoot, 'cli', 'sqlmegane.mjs');
+function runCli(args, input) {
+  return spawnSync(process.execPath, [CLI, ...args], { input, encoding: 'utf8' });
+}
+
+test('CLI: WHERE のない DELETE は要約と【危険】を出し、終了コード 2 で終わる', () => {
+  const r = runCli(['--dialect', 'mysql', '-'], 'DELETE FROM t_log;');
+  assert.equal(r.status, 2, r.stderr);
+  assert.ok(r.stdout.includes('DELETE: `t_log` の全行を削除します'), r.stdout);
+  assert.ok(r.stdout.includes('【危険】WHERE句のないDELETE'), r.stdout);
+  assert.ok(r.stdout.includes('検算SELECT: SELECT COUNT(*) FROM t_log;'), r.stdout);
+});
+
+test('CLI: 主キー1行の UPDATE は danger が無いので終了コード 0', () => {
+  const r = runCli(['--dialect', 'mysql', '-'], ['BEGIN;', 'UPDATE m_users SET status = 1 WHERE id = 5;', 'COMMIT;'].join('\n'));
+  assert.equal(r.status, 0, r.stdout + r.stderr);
+  assert.ok(r.stdout.includes('UPDATE: `m_users` のうち'), r.stdout);
+});
+
+test('CLI: --fail-on info なら info の指摘でも終了コード 2', () => {
+  const r = runCli(['--dialect', 'mysql', '--fail-on', 'info', '-'], "UPDATE m_users SET status = 1 WHERE last_login < '2024-01-01';");
+  assert.equal(r.status, 2, r.stdout + r.stderr);
+});
+
+test('CLI: --json は AST を含まない JSON を返し、方言は自動判定される', () => {
+  const r = runCli(['--json', '-'], 'DELETE FROM t_log;');
+  assert.equal(r.status, 2, r.stderr);
+  const j = JSON.parse(r.stdout);
+  assert.ok(['mysql', 'postgres', 'mssql', 'oracle', 'generic'].includes(j.dialect));
+  assert.equal(j.statements[0].kind, 'DELETE');
+  assert.equal(j.statements[0].findings[0].code, 'no-where-delete');
+  assert.ok(!('parse' in j.statements[0]) && !('ast' in j.statements[0]));
+});
+
+test('CLI: ファイル指定で読める（fixtures を使う）', () => {
+  const tmp = path.join(projectRoot, 'tests', '_cli_tmp.sql');
+  fs.writeFileSync(tmp, 'SELECT 1;', 'utf8');
+  try {
+    const r = runCli(['--dialect', 'generic', tmp]);
+    assert.equal(r.status, 0, r.stdout + r.stderr);
+    assert.ok(r.stdout.includes('#1 SELECT'), r.stdout);
+  } finally {
+    fs.unlinkSync(tmp);
+  }
+});
+
+test('CLI: 空入力と不正オプションは終了コード 1', () => {
+  assert.equal(runCli(['-'], '   ').status, 1);
+  assert.equal(runCli(['--dialect', 'nope', '-'], 'SELECT 1;').status, 1);
+});
+
+test('CLI: PL/SQL ブロック内の WHERE なし DELETE も出力と終了コード判定に含まれる', () => {
+  const plsql = ['BEGIN', '  DELETE FROM t_log;', 'END;', '/'].join('\n');
+  const r = runCli(['--dialect', 'oracle', '-'], plsql);
+  assert.equal(r.status, 2, r.stdout + r.stderr);
+  assert.ok(r.stdout.includes('PL/SQL'), r.stdout);
+  assert.ok(r.stdout.includes('【危険】WHERE句のないDELETE'), r.stdout);
+  const j = JSON.parse(runCli(['--dialect', 'oracle', '--json', '-'], plsql).stdout);
+  assert.ok(j.statements[0].plsql && j.statements[0].plsql.items.length === 1);
+  assert.equal(j.statements[0].plsql.items[0].findings[0].code, 'no-where-delete');
+});
+
+test('CLI: 自動判定が曖昧（ANSI 互換）なら mysql-no-limit を落とす（ブラウザ版と同じ後処理）', () => {
+  const sql = "UPDATE m_users SET status = 'INACTIVE' WHERE last_login < '2024-01-01';";
+  const auto = JSON.parse(runCli(['--json', '-'], sql).stdout);
+  assert.ok(!auto.statements[0].findings.some((f) => f.code === 'mysql-no-limit'), JSON.stringify(auto.statements[0].findings));
+  const mysql = JSON.parse(runCli(['--json', '--dialect', 'mysql', '-'], sql).stdout);
+  assert.ok(mysql.statements[0].findings.some((f) => f.code === 'mysql-no-limit'));
+});
+
+test('CLI: 既定では SQL 本文（raw）を出力に含めず、--include-sql で含める', () => {
+  const sql = "DELETE FROM t_log WHERE note = 'literal-marker-xyz';";
+  const a = JSON.parse(runCli(['--json', '--dialect', 'mysql', '-'], sql).stdout);
+  assert.ok(!('raw' in a.statements[0]));
+  const b = JSON.parse(runCli(['--json', '--include-sql', '--dialect', 'mysql', '-'], sql).stdout);
+  assert.equal(b.statements[0].raw, "DELETE FROM t_log WHERE note = 'literal-marker-xyz'");
+});
+
+test('CLI: 入力が --max-bytes を超えると終了コード 1', () => {
+  const r = runCli(['--max-bytes', '10', '-'], 'SELECT 1 FROM a_very_long_table_name;');
+  assert.equal(r.status, 1, r.stdout);
+  assert.ok(r.stderr.includes('上限'), r.stderr);
+  const tmp = path.join(projectRoot, 'tests', '_cli_big.sql');
+  fs.writeFileSync(tmp, 'SELECT 1;'.repeat(20), 'utf8');
+  try {
+    assert.equal(runCli(['--max-bytes', '50', tmp]).status, 1);
+    assert.equal(runCli(['--max-bytes', '1000', tmp]).status, 0);
+  } finally {
+    fs.unlinkSync(tmp);
+  }
+});
+
+test('CLI: 引数解析の境界（値なしオプション・重複ファイル・-- 以降は位置引数・存在しないファイル）', () => {
+  assert.equal(runCli(['--dialect'], 'SELECT 1;').status, 1);
+  assert.equal(runCli(['--fail-on'], 'SELECT 1;').status, 1);
+  assert.equal(runCli(['--max-bytes', '0', '-'], 'SELECT 1;').status, 1);
+  assert.equal(runCli(['a.sql', 'b.sql']).status, 1);
+  const tmp = path.join(projectRoot, 'tests', '-dash.sql');
+  fs.writeFileSync(tmp, 'SELECT 1;', 'utf8');
+  try {
+    assert.equal(runCli(['--dialect', 'generic', '--', tmp]).status, 0);
+  } finally {
+    fs.unlinkSync(tmp);
+  }
+  assert.equal(runCli(['nonexistent_file_xyz.sql']).status, 1);
 });
 
 // ---------------------------------------------------------------------------
