@@ -1,5 +1,7 @@
 # SQLMegane（SQLめがね）
 
+[English README](README.en.md) / [English UI](https://selene-nyx-ai.github.io/sqlmegane/en/)
+
 **実行前のSQLを、日本語で読み返す道具です。**
 
 本番データベースに手作業でUPDATE/DELETEなどのSQLを実行する前に、貼り付けるだけで
