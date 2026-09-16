@@ -1024,7 +1024,10 @@ body {
 .conversion-fold > pre, .conversion-fold > .column-candidates { margin: 0 16px 14px; }
 
 /* 折りたたみ見出しは「押せる行」と分かるように地色を変え、ホバーで明るくする（しぐれさん指摘 2026-09-17） */
-.conversion-fold > summary { background: var(--bg-elevated); transition: background 0.12s ease; }
-.conversion-fold > summary:hover { background: var(--panel-border-soft); }
-.conversion-fold[open] > summary { background: var(--panel-border-soft); }
+.conversion-fold > summary { background: var(--neutral-bg); transition: background 0.12s ease; }
+.conversion-fold > summary:hover { background: rgba(154, 165, 177, 0.22); }
+.conversion-fold[open] > summary { background: rgba(154, 165, 177, 0.18); }
+.safe-actions { display: flex; flex-wrap: wrap; align-items: center; gap: 10px; }
+.safe-actions .safe-intro { flex-basis: 100%; margin: 0 0 4px; }
+.safe-dml-label { display: inline-flex; align-items: center; gap: 6px; color: var(--text-muted); font-size: 0.92em; }
 .conversion-fold > summary::before { color: var(--accent); }

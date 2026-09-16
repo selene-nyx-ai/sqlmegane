@@ -818,10 +818,14 @@ function appendConvertedStages(card, converted, dialect) {
   card.appendChild(verification);
 
   const safe = el('div', { className: 'conversion-step safe-actions' });
+  // 何をコピーするのかを先に 1 行で（「安全実行の枠付き」では意味が伝わらない、というしぐれさん指摘 2026-09-17）
+  safe.appendChild(el('p', { className: 'hint safe-intro', text: t('ui.safeIntro') }));
+  const dmlLabel = el('label', { className: 'safe-dml-label', text: t('ui.safeDml') });
   const dmlChoice = el('select', { attrs: { 'aria-label': t('ui.safeDml') } });
   dmlChoice.appendChild(el('option', { text: 'UPDATE', attrs: { value: 'update' } }));
   dmlChoice.appendChild(el('option', { text: 'DELETE', attrs: { value: 'delete' } }));
-  safe.appendChild(dmlChoice);
+  dmlLabel.appendChild(dmlChoice);
+  safe.appendChild(dmlLabel);
   const client = el('select', { attrs: { 'aria-label': t('ui.client') } });
   for (const [value, key] of [['generic', 'ui.clientGeneric'], ['sqlplus-interactive', 'ui.clientInteractive'], ['sqlplus-batch', 'ui.clientBatch']]) client.appendChild(el('option', { text: t(key), attrs: { value } }));
   client.hidden = dialect !== 'oracle'; safe.appendChild(client);
