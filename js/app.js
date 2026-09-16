@@ -681,18 +681,64 @@ function sqlCopyBlock(label, sql, enabled) {
   return wrap;
 }
 
-function renderDmlBuilder(sql, dialect) {
-  const converted = DmlBuilder.convert(sql, { dialect, oracleVersion: els.oracleVersion.value });
-  const card = el('details', { className: 'statement-card conversion-card', attrs: { open: '' } });
-  card.appendChild(el('summary', { className: 'conversion-title', text: t('ui.buildDml') }));
-  if (converted.status !== 'ok') {
-    for (const code of converted.reasonCodes || [converted.reasonCode]) {
-      card.appendChild(el('p', { className: 'conversion-error', text: t(`dml.reason.${code}`, converted.reasonParams) }));
-    }
-    card.appendChild(el('p', { className: 'hint', text: t('dml.hint.singleTable') }));
-    return card;
+function appendByKeyChooser(card, sql, dialect, inspection) {
+  const section = el('div', { className: 'conversion-step by-key-chooser' });
+  section.appendChild(el('h3', { text: t('ui.byKeyTitle') }));
+  const outputColumns = inspection.outputColumns.filter((x) => x.name && x.kind !== 'star');
+  if (!outputColumns.length) {
+    section.appendChild(el('p', { className: 'hint', text: t('ui.byKeyAddKey') }));
+    card.appendChild(section); return;
   }
+  const groupName = `by-key-target-${Date.now()}-${Math.random()}`;
+  const tableField = el('fieldset', { className: 'by-key-field' });
+  tableField.appendChild(el('legend', { text: t('ui.byKeyTargetTable') }));
+  const radios = [];
+  for (const table of inspection.tables) {
+    const label = el('label', { className: 'column-choice' });
+    const input = el('input', { attrs: { type: 'radio', name: groupName, value: table.name } });
+    radios.push(input); label.append(input, document.createTextNode(table.alias ? `${table.name} (${table.alias})` : table.name));
+    tableField.appendChild(label);
+  }
+  const otherLabel = el('label', { className: 'column-choice' });
+  const otherRadio = el('input', { attrs: { type: 'radio', name: groupName, value: '__other__' } });
+  const otherInput = el('input', { className: 'by-key-text', attrs: { type: 'text', 'aria-label': t('ui.byKeyOtherTable'), placeholder: t('ui.byKeyOtherTable') } });
+  radios.push(otherRadio); otherLabel.append(otherRadio, document.createTextNode(t('ui.byKeyOther')), otherInput); tableField.appendChild(otherLabel);
+  section.appendChild(tableField);
+
+  const keyField = el('div', { className: 'by-key-field by-key-key-row' });
+  const outputLabel = el('label', { text: t('ui.byKeyOutput') });
+  const outputSelect = el('select');
+  for (const column of outputColumns) outputSelect.appendChild(el('option', { text: column.name, attrs: { value: column.name } }));
+  outputLabel.appendChild(outputSelect);
+  const targetLabel = el('label', { text: t('ui.byKeyTargetKey') });
+  const targetInput = el('input', { attrs: { type: 'text', value: outputSelect.value } });
+  targetLabel.appendChild(targetInput); keyField.append(outputLabel, targetLabel); section.appendChild(keyField);
+  outputSelect.addEventListener('change', () => { targetInput.value = outputSelect.value; });
+  otherInput.addEventListener('focus', () => { otherRadio.checked = true; });
+
+  const button = el('button', { className: 'btn btn-primary', text: t('ui.byKeyConvert'), attrs: { type: 'button' } });
+  const result = el('div', { className: 'by-key-result' });
+  button.addEventListener('click', () => {
+    const selected = radios.find((x) => x.checked);
+    const targetTable = selected && selected.value === '__other__' ? otherInput.value.trim() : (selected ? selected.value : '');
+    if (!targetTable) { result.replaceChildren(el('p', { className: 'conversion-error', text: t('ui.byKeyChooseTable') })); return; }
+    const converted = DmlBuilder.convertByKey(sql, {
+      dialect, oracleVersion: els.oracleVersion.value, targetTable,
+      outputKey: outputSelect.value, targetKey: targetInput.value.trim() || outputSelect.value,
+    });
+    result.replaceChildren();
+    if (converted.status !== 'ok') {
+      result.appendChild(el('p', { className: 'conversion-error', text: t(`dml.reason.${converted.reasonCode}`, converted.reasonParams) }));
+      return;
+    }
+    appendConvertedStages(result, converted, dialect);
+  });
+  section.append(button, result); card.appendChild(section);
+}
+
+function appendConvertedStages(card, converted, dialect) {
   const proven = converted.equivalence === 'proven';
+  for (const code of converted.warnings || []) card.appendChild(el('p', { className: 'conversion-warning', text: t(`dml.warning.${code}`) }));
   card.appendChild(sqlCopyBlock(t('ui.stepOriginal'), converted.original, true));
   card.appendChild(sqlCopyBlock(t('ui.stepCount'), converted.countSelect, true));
   card.appendChild(sqlCopyBlock(t('ui.stepDelete'), converted.delete, proven));
@@ -716,7 +762,9 @@ function renderDmlBuilder(sql, dialect) {
   candidateHead.appendChild(updateCopy); updateStep.appendChild(candidateHead); updateStep.appendChild(choices); updateStep.appendChild(updatePre); card.appendChild(updateStep);
 
   const syntaxOk = Object.values(converted.syntaxCheck || {}).every((x) => x && x.ok);
-  card.appendChild(el('p', { className: 'conversion-step', text: syntaxOk ? t('ui.syntaxCheckOk') : t('ui.syntaxCheckFailed') }));
+  const syntaxMessage = syntaxOk ? t('ui.syntaxCheckOk')
+    : t(converted.mode === 'by-key' ? 'ui.syntaxCheckWithFailed' : 'ui.syntaxCheckFailed');
+  card.appendChild(el('p', { className: 'conversion-step', text: syntaxMessage }));
 
   const verification = el('details', { className: 'conversion-step' });
   verification.appendChild(el('summary', { text: t('ui.selfCheck') }));
@@ -739,6 +787,21 @@ function renderDmlBuilder(sql, dialect) {
   commitButton.disabled = !proven;
   commitButton.addEventListener('click', () => { if (globalThis.confirm(t('ui.commitConfirm'))) copyToClipboard(safeText(true), commitButton); }); safe.appendChild(commitButton);
   card.appendChild(safe);
+  return card;
+}
+
+function renderDmlBuilder(sql, dialect) {
+  const converted = DmlBuilder.convert(sql, { dialect, oracleVersion: els.oracleVersion.value });
+  const inspection = DmlBuilder.inspect(sql, { dialect });
+  const card = el('details', { className: 'statement-card conversion-card', attrs: { open: '' } });
+  card.appendChild(el('summary', { className: 'conversion-title', text: t('ui.buildDml') }));
+  if (converted.status !== 'ok') {
+    for (const code of converted.reasonCodes || [converted.reasonCode]) {
+      card.appendChild(el('p', { className: 'conversion-error', text: t(`dml.reason.${code}`, converted.reasonParams) }));
+    }
+    card.appendChild(el('p', { className: 'hint', text: t('dml.hint.singleTable') }));
+  } else appendConvertedStages(card, converted, dialect);
+  if (inspection.status === 'ok' && (converted.status !== 'ok' || inspection.tables.length > 1)) appendByKeyChooser(card, sql, dialect, inspection);
   return card;
 }
 

@@ -2559,7 +2559,8 @@ test('CLI convert: SQL-only stdout and exit codes 0/3/4', () => {
 test('CLI convert: JSON schema and columns', () => {
   const r = runCli(['convert', '--to', 'update', '--dialect', 'mysql', '--columns', 'name,status', '--json', '-'], 'SELECT id FROM t WHERE id=1');
   assert.equal(r.status, 0, r.stderr); const value = JSON.parse(r.stdout);
-  assert.deepEqual(Object.keys(value), ['status', 'reasonCode', 'sql', 'target', 'dialect', 'oracleVersion', 'placeholders', 'equivalence', 'invariants', 'columnCandidates', 'warnings', 'selfCheck']);
+  assert.deepEqual(Object.keys(value), ['status', 'reasonCode', 'sql', 'target', 'dialect', 'oracleVersion', 'mode', 'placeholders', 'equivalence', 'invariants', 'columnCandidates', 'warnings', 'selfCheck']);
+  assert.equal(value.mode, 'single-table');
   assert.match(value.sql, /SET name = <value>, status = <value>/);
   assert.deepEqual(value.invariants, { whereOnce: true, targetOnce: true, noOtherTables: true });
   assert.ok(!value.selfCheck.some((f) => f.code === 'unfilled-placeholder'), 'convert の生成物ではプレースホルダ未記入を自己検証に含めない');
@@ -2606,8 +2607,168 @@ test('CLI convert: 変換不可のとき理由を全部と単一テーブル化�
   const r = runCli(['convert', '--to', 'delete', '--dialect', 'mysql', '-'], 'SELECT a.id FROM a JOIN b ON a.id = b.a_id LIMIT 5');
   assert.equal(r.status, 3);
   assert.ok(r.stderr.includes('LIMIT') && r.stderr.includes('JOIN'), r.stderr);
-  assert.ok(r.stderr.includes('IN ('), r.stderr);
+  assert.ok(r.stderr.includes('対象表とキー'), r.stderr);
   assert.equal(r.stdout, '');
+});
+
+// ---------------------------------------------------------------------------
+// 更新文を作る 第2弾: キー IN (元の SELECT) 形
+// ---------------------------------------------------------------------------
+
+const byKeyBase = `-- 直近90日の商品集計
+WITH monthly_sales AS (
+  SELECT p.product_id, p.product_name, c.category_name,
+    DATE_TRUNC('month', o.ordered_at) AS sales_month,
+    SUM(oi.quantity * oi.unit_price) AS revenue,
+    COUNT(DISTINCT o.customer_id) AS buyers
+  FROM orders o
+  JOIN order_items oi ON oi.order_id = o.order_id
+  JOIN products p ON p.product_id = oi.product_id
+  JOIN categories c ON c.category_id = p.category_id
+  WHERE o.status = 'completed'
+    AND o.ordered_at >= CURRENT_DATE - INTERVAL '90 days'
+  GROUP BY p.product_id, p.product_name, c.category_name, DATE_TRUNC('month', o.ordered_at)
+), ranked AS (
+  SELECT *,
+    RANK() OVER (PARTITION BY category_name, sales_month ORDER BY revenue DESC) AS rank_in_category,
+    LAG(revenue) OVER (PARTITION BY product_id ORDER BY sales_month) AS prev_revenue
+  FROM monthly_sales
+)
+SELECT category_name, sales_month, rank_in_category, product_name, revenue, buyers,
+  ROUND(100.0 * (revenue - prev_revenue) / NULLIF(prev_revenue, 0), 1) AS mom_growth_pct
+FROM ranked
+WHERE rank_in_category <= 3
+ORDER BY sales_month DESC, category_name, rank_in_category;`;
+const byKeyWithId = byKeyBase.replace('SELECT category_name,', 'SELECT product_id, category_name,');
+
+test('by-key inspect: CTE 名を除外し全基底表と CTE を返す', () => {
+  const r = DmlBuilder.inspect(byKeyBase, { dialect: 'postgres' });
+  assert.equal(r.status, 'ok');
+  assert.deepEqual(r.tables.map((x) => x.name), ['orders', 'order_items', 'products', 'categories']);
+  assert.deepEqual(r.ctes, ['monthly_sales', 'ranked']);
+  assert.ok(r.tables.every((x) => x.where === 'cte:monthly_sales'));
+  assert.equal(r.singleTable, false);
+});
+test('by-key inspect: 最終 SELECT の出力名と種類を返す', () => {
+  const cols = DmlBuilder.inspect(byKeyBase, { dialect: 'postgres' }).outputColumns;
+  assert.ok(cols.some((x) => x.name === 'product_name' && x.kind === 'column'));
+  assert.ok(cols.some((x) => x.name === 'mom_growth_pct' && x.kind === 'alias'));
+  assert.ok(!cols.some((x) => x.name === 'product_id'));
+});
+test('by-key: 出力にキーがなければ key-not-in-output', () => {
+  const r = DmlBuilder.convertByKey(byKeyBase, { dialect: 'postgres', targetTable: 'products', outputKey: 'product_id' });
+  assert.equal(r.reasonCode, 'key-not-in-output');
+  assert.equal(r.reasonParams.key, 'product_id');
+  assert.match(r.reasonParams.available, /product_name/);
+});
+test('by-key: CTE/JOIN/集計を派生表に保った DELETE を作る', () => {
+  const r = DmlBuilder.convertByKey(byKeyWithId, { dialect: 'postgres', targetTable: 'products', outputKey: 'product_id' });
+  assert.equal(r.status, 'ok'); assert.equal(r.equivalence, 'proven');
+  assert.match(r.delete, /DELETE FROM products WHERE product_id IN \(SELECT product_id FROM \(WITH monthly_sales AS/);
+  assert.match(r.delete, /\) sqlmegane_src\);$/);
+});
+test('by-key: 末尾 ORDER BY と先頭コメントを inner から除く', () => {
+  const r = DmlBuilder.convertByKey(byKeyWithId, { dialect: 'postgres', targetTable: 'products', outputKey: 'product_id' });
+  const inner = DmlBuilder._internal.innerSelect(byKeyWithId);
+  assert.equal(inner.orderByRemoved, true); assert.doesNotMatch(inner.text, /ORDER BY sales_month DESC/);
+  assert.ok(!inner.text.startsWith('--')); assert.match(r.delete, /removed the final ORDER BY/);
+});
+for (const dialect of ['mysql', 'postgres', 'mssql', 'oracle', 'generic']) {
+  test(`by-key: ${dialect} で派生表形と syntaxCheck を返す`, () => {
+    const r = DmlBuilder.convertByKey(byKeyWithId, { dialect, targetTable: 'products', outputKey: 'product_id' });
+    assert.equal(r.status, 'ok'); assert.match(r.update, /FROM \(WITH monthly_sales/);
+    assert.equal(typeof r.syntaxCheck.update.ok, 'boolean');
+    assert.equal(r.syntaxCheck.update.mode, ['mysql', 'postgres', 'mssql'].includes(dialect) ? 'ast' : 'basic');
+  });
+}
+test('by-key: PostgreSQL 固有の元 SELECT は方言別 syntaxCheck に結果を記録する', () => {
+  const expected = { mysql: false, postgres: true, mssql: false, oracle: true, generic: true };
+  for (const [dialect, ok] of Object.entries(expected)) {
+    const r = DmlBuilder.convertByKey(byKeyWithId, { dialect, targetTable: 'products', outputKey: 'product_id' });
+    assert.equal(r.syntaxCheck.delete.ok, ok, dialect);
+    assert.equal(r.equivalence, 'proven', `${dialect}: 構文確認と意味の不変条件は別`);
+  }
+});
+test('by-key: outputKey と targetKey を別名にできる', () => {
+  const r = DmlBuilder.convertByKey('SELECT pid AS product_id FROM source_products', { dialect: 'postgres', targetTable: 'products', outputKey: 'product_id', targetKey: 'id' });
+  assert.match(r.delete, /WHERE id IN \(SELECT product_id FROM/);
+});
+test('by-key: SELECT * のみは star-output', () => {
+  assert.equal(DmlBuilder.convertByKey('SELECT * FROM products', { dialect: 'mysql', targetTable: 'products', outputKey: 'id' }).reasonCode, 'star-output');
+});
+test('by-key: query 外の対象表でも生成し warning を返す', () => {
+  const r = DmlBuilder.convertByKey('SELECT id FROM source_table', { dialect: 'mysql', targetTable: 'other_table', outputKey: 'id' });
+  assert.equal(r.status, 'ok'); assert.ok(r.warnings.includes('target-not-in-query'));
+});
+test('by-key: NULL と再評価の warning を必ず返す', () => {
+  const r = DmlBuilder.convertByKey('SELECT id FROM products', { dialect: 'mysql', targetTable: 'products', outputKey: 'id' });
+  assert.deepEqual(r.warnings, ['null-key-ignored', 'subquery-recomputed']);
+});
+test('by-key: MySQL の更新対象自己参照も二重派生表になる', () => {
+  const r = DmlBuilder.convertByKey('SELECT id FROM t WHERE active = 0', { dialect: 'mysql', targetTable: 't', outputKey: 'id' });
+  assert.match(r.delete, /DELETE FROM t WHERE id IN \(SELECT id FROM \(SELECT id FROM t WHERE active = 0\) sqlmegane_src\)/);
+});
+test('by-key: 引用識別子は大小文字を区別する', () => {
+  const bad = DmlBuilder.convertByKey('SELECT id AS "Product_ID" FROM t', { dialect: 'postgres', targetTable: 't', outputKey: '"product_id"' });
+  assert.equal(bad.reasonCode, 'key-not-in-output');
+  const ok = DmlBuilder.convertByKey('SELECT id AS "Product_ID" FROM t', { dialect: 'postgres', targetTable: 't', outputKey: '"Product_ID"' });
+  assert.equal(ok.status, 'ok');
+});
+test('by-key: unquoted outputKey は大小文字を区別しない', () => {
+  assert.equal(DmlBuilder.convertByKey('SELECT ID FROM t', { dialect: 'mysql', targetTable: 't', outputKey: 'id' }).status, 'ok');
+});
+test('by-key: invariants の実測が偽なら proven にならない', () => {
+  const inner = 'SELECT id FROM t';
+  const generated = { update: 'UPDATE t SET c=0 WHERE id IN (SELECT id FROM (SELECT 1) sqlmegane_src);', delete: 'DELETE FROM t;', countSelect: 'SELECT COUNT(*) FROM t;' };
+  const inv = DmlBuilder._internal.byKeyInvariants(generated, inner, 't', 'id');
+  assert.equal(inv.innerOnce, false); assert.equal(Object.values(inv).every(Boolean), false);
+});
+test('by-key inspect: サブクエリ内の基底表も収集する', () => {
+  const r = DmlBuilder.inspect('SELECT t.id, (SELECT MAX(x.v) FROM extras x) AS mx FROM things t WHERE EXISTS (SELECT 1 FROM flags f)', { dialect: 'postgres' });
+  assert.deepEqual(r.tables.map((x) => x.name), ['things', 'extras', 'flags']);
+  assert.equal(r.tables[0].where, 'outer'); assert.ok(r.tables.slice(1).every((x) => x.where === 'subquery'));
+});
+test('CLI by-key: DELETE を stdout に出して mode を JSON に含める', () => {
+  const textResult = runCli(['convert', '--to', 'delete', '--dialect', 'postgres', '--target', 'products', '--by-key', 'product_id', '-'], byKeyWithId);
+  assert.equal(textResult.status, 0, textResult.stderr); assert.match(textResult.stdout, /DELETE FROM products WHERE product_id IN/);
+  const jsonResult = runCli(['convert', '--to', 'delete', '--dialect', 'postgres', '--target', 'products', '--by-key', 'product_id', '--json', '-'], byKeyWithId);
+  assert.equal(jsonResult.status, 0, jsonResult.stderr); const value = JSON.parse(jsonResult.stdout);
+  assert.equal(value.mode, 'by-key'); assert.ok(value.warnings.includes('null-key-ignored'));
+});
+test('CLI by-key: --target と --by-key は両方必須', () => {
+  assert.equal(runCli(['convert', '--to', 'delete', '--dialect', 'mysql', '--target', 't', '-'], 'SELECT id FROM t').status, 1);
+  assert.equal(runCli(['convert', '--to', 'delete', '--dialect', 'mysql', '--by-key', 'id', '-'], 'SELECT id FROM t').status, 1);
+});
+test('CLI inspect: tables / ctes / outputColumns を JSON で返す', () => {
+  const r = runCli(['inspect', '--dialect', 'postgres', '-'], byKeyWithId);
+  assert.equal(r.status, 0, r.stderr); const value = JSON.parse(r.stdout);
+  assert.deepEqual(value.ctes, ['monthly_sales', 'ranked']); assert.ok(value.tables.some((x) => x.name === 'products'));
+  assert.ok(value.outputColumns.some((x) => x.name === 'product_id'));
+});
+test('by-key i18n: 英語の理由と warning を返して日本語に戻せる', () => {
+  globalThis.SQLMeganeI18n.setLocale('en');
+  assert.match(globalThis.SQLMeganeI18n.t('dml.reason.key-not-in-output', { key: 'id', available: 'name' }), /not in the final SELECT output/);
+  assert.match(globalThis.SQLMeganeI18n.t('dml.warning.null-key-ignored'), /NULL/);
+  globalThis.SQLMeganeI18n.setLocale('ja');
+  assert.match(globalThis.SQLMeganeI18n.t('dml.warning.subquery-recomputed'), /再評価/);
+});
+test('by-key UI: 対象表選択と warning 用の文言を i18n 経由で持つ', () => {
+  assert.equal(globalThis.SQLMeganeI18n.t('ui.byKeyTitle'), '対象表とキーを選んで変換する');
+  assert.match(readProjectFile('js/app.js'), /appendByKeyChooser/);
+  assert.match(readProjectFile('css/style.css'), /conversion-warning/);
+});
+
+test('by-key: 行数制限のある SELECT では ORDER BY を落とさず派生表に残す（上位 N 件の意味を保つ）', () => {
+  const B = globalThis.SQLMeganeDmlBuilder;
+  const limited = B.convertByKey('SELECT id, score FROM scores s ORDER BY score DESC LIMIT 5', { dialect: 'postgres', targetTable: 'scores', outputKey: 'id' });
+  assert.equal(limited.status, 'ok', JSON.stringify(limited.reasonCodes));
+  assert.ok(limited.delete.includes('ORDER BY score DESC LIMIT 5) sqlmegane_src'), limited.delete);
+  assert.ok(!limited.delete.includes('removed the final ORDER BY'), limited.delete);
+  const plain = B.convertByKey('SELECT id, score FROM scores s ORDER BY score DESC', { dialect: 'postgres', targetTable: 'scores', outputKey: 'id' });
+  assert.ok(!plain.delete.includes('ORDER BY score'), plain.delete);
+  assert.ok(plain.delete.includes('removed the final ORDER BY'), plain.delete);
+  const top = B.convertByKey('SELECT TOP 5 id FROM scores ORDER BY score DESC', { dialect: 'mssql', targetTable: 'scores', outputKey: 'id' });
+  assert.ok(top.delete.includes('TOP 5 id FROM scores ORDER BY score DESC) sqlmegane_src'), top.delete);
 });
 
 // ---------------------------------------------------------------------------

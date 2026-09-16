@@ -313,6 +313,7 @@ function parseSubcommand(argv, command) {
     command, to: null, kind: null, dialect: command === 'convert' ? 'auto' : 'generic',
     oracleVersion: 'legacy', columns: [], safeBlock: null, commit: false,
     lang: 'ja', json: false, maxBytes: DEFAULT_MAX_BYTES, file: null,
+    target: null, byKey: null, targetKey: null,
   };
   let positionalOnly = false;
   const value = (name, index) => {
@@ -332,6 +333,9 @@ function parseSubcommand(argv, command) {
       else if (name === '--dialect') out.dialect = take();
       else if (name === '--oracle-version') out.oracleVersion = take();
       else if (name === '--columns') out.columns = take().split(',').map((x) => x.trim()).filter(Boolean);
+      else if (name === '--target') out.target = take();
+      else if (name === '--by-key') out.byKey = take();
+      else if (name === '--target-key') out.targetKey = take();
       else if (name === '--safe-block') out.safeBlock = take();
       else if (name === '--lang') out.lang = take();
       else if (name === '--max-bytes') out.maxBytes = Number(take());
@@ -350,9 +354,13 @@ function parseSubcommand(argv, command) {
   if (command === 'convert') {
     if (!['update', 'delete'].includes(out.to)) throw new UsageError('--to must be update or delete');
     if (out.safeBlock && !['generic', 'sqlplus-interactive', 'sqlplus-batch'].includes(out.safeBlock)) throw new UsageError('Invalid --safe-block client');
-  } else {
+    if (!!out.target !== !!out.byKey) throw new UsageError('--target and --by-key must be specified together');
+    if (out.targetKey && !out.byKey) throw new UsageError('--target-key requires --target and --by-key');
+  } else if (command === 'template') {
     if (!['update', 'delete', 'insert-select', 'upsert', 'merge', 'create-table', 'safe-block'].includes(out.kind)) throw new UsageError('Invalid or missing --kind');
     if (out.dialect === 'auto') throw new UsageError('template requires an explicit dialect');
+  } else if (command === 'inspect') {
+    if (out.dialect === 'auto') throw new UsageError('inspect requires an explicit dialect');
   }
   return out;
 }
@@ -370,23 +378,32 @@ async function runSubcommand(command, argv) {
   try { sql = await readInput(opts.file, opts.maxBytes); }
   catch (err) { process.stderr.write(`${err.message}\n`); process.exitCode = 1; return; }
   if (!sql.trim()) { process.stderr.write((opts.lang === 'en' ? 'SQL input is empty.' : 'SQL が空です。') + '\n'); process.exitCode = 1; return; }
+  if (command === 'inspect') {
+    const inspected = DmlBuilder.inspect(sql, { dialect: opts.dialect });
+    process.stdout.write(JSON.stringify(inspected, null, 2) + '\n');
+    process.exitCode = inspected.status === 'ok' ? 0 : 3;
+    return;
+  }
+  const mode = opts.target && opts.byKey ? 'by-key' : 'single-table';
   let dialect = opts.dialect;
   if (dialect === 'auto') {
     const detected = detectDialect(sql);
     if (!detected || ['parse-success-ambiguous', 'undetermined', 'empty'].includes(detected.reason)) {
       const reasonCode = 'dialect-ambiguous';
-      if (opts.json) process.stdout.write(JSON.stringify({ status: 'unsupported', reasonCode, sql: null, target: null, dialect: 'auto', oracleVersion: opts.oracleVersion, placeholders: [], equivalence: 'unsupported' }) + '\n');
+      if (opts.json) process.stdout.write(JSON.stringify({ status: 'unsupported', reasonCode, sql: null, target: null, dialect: 'auto', oracleVersion: opts.oracleVersion, placeholders: [], equivalence: 'unsupported', mode, warnings: [] }) + '\n');
       else process.stderr.write(t(`dml.reason.${reasonCode}`) + '\n');
       process.exitCode = 4; return;
     }
     dialect = detected.dialect;
   }
-  const converted = DmlBuilder.convert(sql, { dialect, oracleVersion: opts.oracleVersion });
+  const converted = mode === 'by-key'
+    ? DmlBuilder.convertByKey(sql, { dialect, oracleVersion: opts.oracleVersion, targetTable: opts.target, outputKey: opts.byKey, targetKey: opts.targetKey })
+    : DmlBuilder.convert(sql, { dialect, oracleVersion: opts.oracleVersion });
   if (converted.status !== 'ok') {
-    if (opts.json) process.stdout.write(JSON.stringify({ status: converted.status, reasonCode: converted.reasonCode, sql: null, target: null, dialect, oracleVersion: opts.oracleVersion, placeholders: [], equivalence: converted.equivalence }) + '\n');
+    if (opts.json) process.stdout.write(JSON.stringify({ status: converted.status, reasonCode: converted.reasonCode, reasonParams: converted.reasonParams, sql: null, target: null, dialect, oracleVersion: opts.oracleVersion, placeholders: [], equivalence: converted.equivalence, mode, warnings: converted.warnings || [] }) + '\n');
     else {
       for (const code of converted.reasonCodes || [converted.reasonCode]) process.stderr.write(t(`dml.reason.${code}`, converted.reasonParams) + '\n');
-      process.stderr.write(t('dml.hint.singleTable') + '\n');
+      process.stderr.write(t(mode === 'by-key' ? 'dml.hint.byKey' : 'dml.hint.singleTable') + '\n');
     }
     process.exitCode = 3; return;
   }
@@ -397,12 +414,14 @@ async function runSubcommand(command, argv) {
   const selfFindings = selfCheck.statements.flatMap((s) => s.findings)
     .filter((f) => (f.severity === 'danger' || f.severity === 'warning') && f.code !== 'unfilled-placeholder');
   if (!opts.json) for (const f of selfFindings) process.stderr.write(`${findingLine(f)}\n`);
+  if (!opts.json && mode === 'by-key') for (const code of converted.warnings) process.stderr.write(`${t(`dml.warning.${code}`)}\n`);
   let output = dml;
   if (opts.safeBlock) output = Templates.buildSafeBlock({ dialect, client: opts.safeBlock, originalSelect: converted.original, countSelect: converted.countSelect, dml: output, locale: opts.lang, commit: opts.commit });
   if (opts.json) {
     const placeholders = [...new Set(output.match(/<[a-z_]+>/g) || [])];
     process.stdout.write(JSON.stringify({
       status: 'ok', reasonCode: null, sql: output, target: converted.target, dialect, oracleVersion: opts.oracleVersion,
+      mode,
       placeholders, equivalence: converted.equivalence, invariants: converted.invariants,
       columnCandidates: converted.columnCandidates, warnings: converted.warnings,
       selfCheck: selfFindings.map((f) => ({ severity: f.severity, code: f.code, title: f.title })),
@@ -414,7 +433,7 @@ async function runSubcommand(command, argv) {
 async function main() {
   installEpipeHandler();
   const rawArgs = process.argv.slice(2);
-  if (rawArgs[0] === 'convert' || rawArgs[0] === 'template') {
+  if (rawArgs[0] === 'convert' || rawArgs[0] === 'template' || rawArgs[0] === 'inspect') {
     await runSubcommand(rawArgs[0], rawArgs.slice(1));
     return;
   }

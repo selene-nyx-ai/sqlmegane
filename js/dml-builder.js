@@ -9,7 +9,7 @@ const REASON_CODES = new Set([
   'join-unsupported-v1', 'row-limit', 'grouping', 'set-operation',
   'cte-unsupported-v1', 'derived-table', 'hierarchical-or-special',
   'lock-clause', 'select-into', 'not-single-select', 'parse-failed',
-  'dialect-ambiguous',
+  'dialect-ambiguous', 'key-not-in-output', 'star-output',
 ]);
 
 function lex(sql) {
@@ -135,6 +135,280 @@ function normalizeIdentifier(s) {
   return String(s || '').replace(/^(?:"(.*)"|`(.*)`|\[(.*)\])$/, '$1$2$3').toLowerCase();
 }
 
+function identifierValue(value) {
+  if (value == null) return null;
+  if (typeof value === 'string') return value;
+  if (typeof value === 'object') return identifierValue(value.value != null ? value.value : value.expr);
+  return null;
+}
+
+function isQuotedIdentifier(value) {
+  const s = String(value || '');
+  return (s.startsWith('"') && s.endsWith('"')) || (s.startsWith('`') && s.endsWith('`')) || (s.startsWith('[') && s.endsWith(']'));
+}
+
+function identifierEquals(a, b) {
+  if (a == null || b == null) return false;
+  if (isQuotedIdentifier(a) || isQuotedIdentifier(b)) return String(a) === String(b);
+  return normalizeIdentifier(a) === normalizeIdentifier(b);
+}
+
+function tableText(ref) {
+  if (!ref || !ref.table) return null;
+  return [ref.db, ref.schema, ref.table].filter(Boolean).join('.');
+}
+
+function collectAstTables(ast) {
+  const ctes = [];
+  const cteSet = new Set();
+  const tables = [];
+  const seenNodes = new Set();
+  const processedSelects = new Set();
+  const addCte = (name) => {
+    if (name == null || cteSet.has(normalizeIdentifier(name))) return;
+    ctes.push(name); cteSet.add(normalizeIdentifier(name));
+  };
+  for (const item of (ast && ast.with) || []) addCte(identifierValue(item.name));
+  const addTable = (ref, where) => {
+    const name = tableText(ref);
+    if (!name || cteSet.has(normalizeIdentifier(ref.table))) return;
+    const key = normalizeIdentifier(name);
+    let found = tables.find((x) => normalizeIdentifier(x.name) === key);
+    if (!found) { found = { name, alias: [], where }; tables.push(found); }
+    if (ref.as && !found.alias.some((a) => identifierEquals(a, ref.as))) found.alias.push(ref.as);
+  };
+  const walk = (node, where, isRoot) => {
+    if (!node || typeof node !== 'object' || seenNodes.has(node)) return;
+    seenNodes.add(node);
+    if (Array.isArray(node)) { for (const value of node) walk(value, where, false); return; }
+    const select = node.type === 'select' ? node : (node.ast && node.ast.type === 'select' ? node.ast : null);
+    if (select && !processedSelects.has(select)) {
+      processedSelects.add(select);
+      for (const item of select.with || []) {
+        const name = identifierValue(item.name); addCte(name);
+        walk(item.stmt, `cte:${name}`, false);
+      }
+      for (const ref of select.from || []) {
+        if (ref && ref.table) addTable(ref, where);
+        if (ref && ref.expr) walk(ref.expr, 'subquery', false);
+      }
+      for (const [key, value] of Object.entries(select)) {
+        if (key !== 'with' && key !== 'from') walk(value, isRoot ? 'subquery' : where, false);
+      }
+      return;
+    }
+    for (const value of Object.values(node)) walk(value, where, false);
+  };
+  walk(ast, 'outer', true);
+  return { tables: tables.map((x) => ({ ...x, alias: x.alias.join(', ') || null })), ctes };
+}
+
+function cteNamesFromTokens(tokens) {
+  const names = [];
+  const first = tokens.find((t) => t.depth === 0);
+  if (!first || first.upper !== 'WITH') return names;
+  for (let j = tokens.indexOf(first) + 1; j < tokens.length; j++) {
+    const t = tokens[j];
+    if (t.depth !== 0 || !isIdentifier(t) || t.upper === 'RECURSIVE') continue;
+    let k = j + 1;
+    if (tokens[k] && tokens[k].text === '(' && tokens[k].depth === 0) {
+      k++; while (tokens[k] && !(tokens[k].text === ')' && tokens[k].depth === 0)) k++;
+      k++;
+    }
+    if (tokens[k] && tokens[k].depth === 0 && tokens[k].upper === 'AS' && tokens[k + 1] && tokens[k + 1].text === '(') names.push(t.text);
+    if (t.upper === 'SELECT') break;
+  }
+  return [...new Set(names)];
+}
+
+function cteSpansFromTokens(tokens, ctes) {
+  const wanted = new Set(ctes.map(normalizeIdentifier));
+  const spans = [];
+  for (let i = 0; i < tokens.length - 2; i++) {
+    if (tokens[i].depth !== 0 || !isIdentifier(tokens[i]) || !wanted.has(normalizeIdentifier(tokens[i].text))) continue;
+    let asAt = i + 1;
+    if (tokens[asAt] && tokens[asAt].text === '(' && tokens[asAt].depth === 0) {
+      asAt++;
+      while (tokens[asAt] && !(tokens[asAt].text === ')' && tokens[asAt].depth === 0)) asAt++;
+      asAt++;
+    }
+    const open = tokens[asAt + 1];
+    if (!tokens[asAt] || tokens[asAt].upper !== 'AS' || !open || open.text !== '(' || open.depth !== 0) continue;
+    const close = tokens.find((t, j) => j > asAt + 1 && t.text === ')' && t.depth === 0);
+    if (close) spans.push({ name: tokens[i].text, start: open.end, end: close.start });
+  }
+  return spans;
+}
+
+function collectLexicalTables(tokens, ctes) {
+  const tables = [];
+  const cteSet = new Set(ctes.map(normalizeIdentifier));
+  const cteSpans = cteSpansFromTokens(tokens, ctes);
+  for (let i = 0; i < tokens.length; i++) {
+    if (!['FROM', 'JOIN'].includes(tokens[i].upper)) continue;
+    let j = i + 1;
+    if (!isIdentifier(tokens[j]) || ['SELECT', 'LATERAL'].includes(tokens[j].upper)) continue;
+    const parts = [tokens[j].text]; j++;
+    while (tokens[j] && tokens[j].text === '.' && isIdentifier(tokens[j + 1])) { parts.push('.', tokens[j + 1].text); j += 2; }
+    const name = parts.join('');
+    if (cteSet.has(normalizeIdentifier(name.split('.').pop()))) continue;
+    if (tokens[j] && tokens[j].text === '(') continue;
+    if (tokens[j] && tokens[j].upper === 'AS') j++;
+    const alias = isIdentifier(tokens[j]) && !['WHERE', 'JOIN', 'ON', 'GROUP', 'ORDER', 'HAVING', 'UNION', 'LIMIT', 'OFFSET', 'FETCH'].includes(tokens[j].upper) ? tokens[j].text : null;
+    let found = tables.find((x) => normalizeIdentifier(x.name) === normalizeIdentifier(name));
+    const cte = cteSpans.find((span) => tokens[i].start >= span.start && tokens[i].start < span.end);
+    if (!found) { found = { name, alias: [], where: tokens[i].depth === 0 ? 'outer' : (cte ? `cte:${cte.name}` : 'subquery') }; tables.push(found); }
+    if (alias && !found.alias.some((a) => identifierEquals(a, alias))) found.alias.push(alias);
+  }
+  return tables.map((x) => ({ ...x, alias: x.alias.join(', ') || null }));
+}
+
+function finalSelectInfo(tokens) {
+  const selects = tokens.filter((t) => t.depth === 0 && t.upper === 'SELECT');
+  const select = selects[selects.length - 1];
+  if (!select) return null;
+  const selectIndex = tokens.indexOf(select);
+  const fromIndex = tokens.findIndex((t, i) => i > selectIndex && t.depth === 0 && t.upper === 'FROM');
+  return fromIndex < 0 ? null : { selectIndex, fromIndex };
+}
+
+function outputColumnsFromTokens(tokens) {
+  const info = finalSelectInfo(tokens);
+  if (!info) return [];
+  let listTokens = tokens.slice(info.selectIndex + 1, info.fromIndex);
+  // 選択リスト先頭の修飾子（DISTINCT / ALL / SQL Server の TOP n・TOP (n) [PERCENT] [WITH TIES]）は列ではないので読み飛ばす
+  for (;;) {
+    const first = listTokens[0];
+    if (!first || first.depth !== 0) break;
+    if (['DISTINCT', 'ALL'].includes(first.upper)) { listTokens = listTokens.slice(1); continue; }
+    if (first.upper === 'TOP') {
+      let i = 1;
+      if (listTokens[i] && listTokens[i].text === '(') { while (listTokens[i] && !(listTokens[i].text === ')' && listTokens[i].depth === 0)) i++; i++; }
+      else if (listTokens[i] && listTokens[i].kind === 'number') i++;
+      if (listTokens[i] && listTokens[i].upper === 'PERCENT') i++;
+      if (listTokens[i] && listTokens[i].upper === 'WITH' && listTokens[i + 1] && listTokens[i + 1].upper === 'TIES') i += 2;
+      listTokens = listTokens.slice(i); continue;
+    }
+    break;
+  }
+  const groups = []; let current = [];
+  for (const token of listTokens) {
+    if (token.depth === 0 && token.text === ',') { groups.push(current); current = []; } else current.push(token);
+  }
+  groups.push(current);
+  return groups.map((group) => {
+    if (!group.length) return null;
+    const top = group.filter((t) => t.depth === 0);
+    const star = (top.length === 1 && top[0].text === '*')
+      || (top.length === 3 && isIdentifier(top[0]) && top[1].text === '.' && top[2].text === '*');
+    if (star) return { name: '*', kind: 'star' };
+    let asAt = -1;
+    for (let i = top.length - 2; i >= 0; i--) if (top[i].upper === 'AS' && isIdentifier(top[i + 1])) { asAt = i; break; }
+    if (asAt >= 0) return { name: top[asAt + 1].text, kind: 'alias' };
+    const simple = (top.length === 1 && isIdentifier(top[0]))
+      || (top.length === 3 && isIdentifier(top[0]) && top[1].text === '.' && isIdentifier(top[2]));
+    if (simple) return { name: top[top.length - 1].text, kind: 'column' };
+    return { name: null, kind: 'expression' };
+  }).filter(Boolean);
+}
+
+function inspect(sqlText, options) {
+  const original = String(sqlText || '');
+  const dialect = (options && options.dialect) || 'generic';
+  const statements = significantStatements(original, dialect);
+  if (statements.length !== 1) return { status: 'unsupported', reasonCode: 'not-single-select', tables: [], ctes: [], outputColumns: [], singleTable: false };
+  const statement = statements[0].trim();
+  const tokens = lex(statement);
+  const first = tokens.find((t) => t.depth === 0);
+  if (!first || !['SELECT', 'WITH'].includes(first.upper)) return { status: 'unsupported', reasonCode: 'not-single-select', tables: [], ctes: [], outputColumns: [], singleTable: false };
+  let details = null;
+  const Ast = globalThis.SQLMeganeSqlAst;
+  if (['mysql', 'postgres', 'mssql'].includes(dialect) && Ast && Ast.isAvailable(dialect)) {
+    const parsed = Ast.parseStatement(statement, dialect);
+    if (parsed.ok && !parsed.usedFallbackDialect) details = collectAstTables(parsed.ast);
+  }
+  if (!details) {
+    const ctes = cteNamesFromTokens(tokens);
+    details = { ctes, tables: collectLexicalTables(tokens, ctes) };
+  }
+  const outputColumns = outputColumnsFromTokens(tokens);
+  return { status: 'ok', reasonCode: null, tables: details.tables, ctes: details.ctes, outputColumns, singleTable: details.tables.length === 1 };
+}
+
+function stripLeadingComments(sql) {
+  let out = String(sql || '').replace(/^\uFEFF/, '');
+  while (true) {
+    const next = out.replace(/^\s+/, '');
+    if (next.startsWith('--')) { const nl = next.indexOf('\n'); out = nl < 0 ? '' : next.slice(nl + 1); continue; }
+    if (next.startsWith('/*')) { const end = next.indexOf('*/', 2); out = end < 0 ? '' : next.slice(end + 2); continue; }
+    return next;
+  }
+}
+
+function innerSelect(sql) {
+  let statement = stripLeadingComments(sql).replace(/;\s*$/, '').trimEnd();
+  const tokens = lex(statement);
+  const info = finalSelectInfo(tokens);
+  if (!info) return { text: statement, orderByRemoved: false };
+  const orderIndex = tokens.findIndex((t, i) => i > info.fromIndex && t.depth === 0 && t.upper === 'ORDER'
+    && tokens[i + 1] && tokens[i + 1].depth === 0 && tokens[i + 1].upper === 'BY');
+  if (orderIndex < 0) return { text: statement, orderByRemoved: false };
+  // 行数制限（LIMIT / OFFSET / FETCH / TOP）がある SELECT では ORDER BY が行集合そのものを決める。
+  // その場合は ORDER BY を落とすと「上位 N 件」の意味が消えて対象が広がるので、何も削らずそのまま派生表にする。
+  const top = tokens.filter((t) => t.depth === 0);
+  const selectAt = top.findIndex((t) => t.start === tokens[info.selectIndex >= 0 ? info.selectIndex : 0].start);
+  const hasRowLimit = top.some((t, i) => (['LIMIT', 'OFFSET', 'FETCH'].includes(t.upper) && t.start > tokens[info.fromIndex].start)
+    || (t.upper === 'TOP' && selectAt >= 0 && i === selectAt + 1));
+  if (hasRowLimit) return { text: statement, orderByRemoved: false, rowLimitKept: true };
+  return { text: statement.slice(0, tokens[orderIndex].start).trimEnd(), orderByRemoved: true };
+}
+
+function byKeyInvariants(generated, inner, targetTable, outputKey) {
+  const values = Object.values(generated);
+  const targetNorm = normalizeIdentifier(String(targetTable).split('.').pop());
+  const outside = (sql) => sql.slice(0, sql.indexOf(' IN (SELECT '));
+  return {
+    innerOnce: values.every((sql) => countLiteral(sql, inner) === 1),
+    targetOnce: values.every((sql) => lex(outside(sql)).filter((t) => isIdentifier(t) && normalizeIdentifier(t.text) === targetNorm).length === 1),
+    keyInOutput: values.every((sql) => sql.includes(`SELECT ${outputKey} FROM (`)),
+  };
+}
+
+function convertByKey(sqlText, options) {
+  const original = String(sqlText || '');
+  const opts = options || {};
+  const dialect = opts.dialect || 'generic';
+  const checked = inspect(original, { dialect });
+  if (checked.status !== 'ok') return unsupported(checked.reasonCode, original);
+  const targetTable = String(opts.targetTable || '').trim();
+  const outputKey = String(opts.outputKey || '').trim();
+  const targetKey = String(opts.targetKey || outputKey).trim();
+  const named = checked.outputColumns.filter((c) => c.name && c.kind !== 'star');
+  if (!named.length && checked.outputColumns.some((c) => c.kind === 'star')) return unsupported('star-output', original);
+  if (!named.some((c) => identifierEquals(c.name, outputKey))) {
+    const result = unsupported('key-not-in-output', original, { key: outputKey, available: named.map((c) => c.name).join(', ') });
+    result.inspection = checked; return result;
+  }
+  const inner = innerSelect(original);
+  const note = inner.orderByRemoved ? '-- SQLMegane: removed the final ORDER BY inside the derived table.\n' : '';
+  const predicate = `${targetKey} IN (SELECT ${outputKey} FROM (${inner.text}) sqlmegane_src)`;
+  const update = `${note}UPDATE ${targetTable} SET <column> = <value> WHERE ${predicate};`;
+  const del = `${note}DELETE FROM ${targetTable} WHERE ${predicate};`;
+  const countSelect = `${note}SELECT COUNT(*) FROM ${targetTable} WHERE ${predicate};`;
+  const warnings = ['null-key-ignored', 'subquery-recomputed'];
+  if (!checked.tables.some((t) => identifierEquals(t.name, targetTable))) warnings.push('target-not-in-query');
+  const generated = { update, delete: del, countSelect };
+  const invariants = byKeyInvariants(generated, inner.text, targetTable, outputKey);
+  return {
+    status: 'ok', reasonCode: null, reasonCodes: [], reasonParams: {}, mode: 'by-key',
+    target: { table: targetTable, alias: null, asWritten: targetTable, outputKey, targetKey },
+    original: original.trim().replace(/;\s*$/, '') + ';', delete: del, update, countSelect,
+    columnCandidates: [], equivalence: Object.values(invariants).every(Boolean) ? 'proven' : 'unsupported',
+    invariants, warnings, inspection: checked,
+    syntaxCheck: { delete: syntaxCheck(del, dialect), update: syntaxCheck(update, dialect), countSelect: syntaxCheck(countSelect, dialect) },
+  };
+}
+
 function columnCandidates(sql, tokens, selectIndex, fromIndex, target) {
   const selected = tokens.slice(selectIndex + 1, fromIndex);
   const groups = []; let current = [];
@@ -183,7 +457,12 @@ function syntaxCheck(sql, dialect) {
   const Ast = globalThis.SQLMeganeSqlAst;
   if (['mysql', 'postgres', 'mssql'].includes(dialect) && Ast && Ast.isAvailable(dialect)) {
     const parsed = Ast.parseStatement(parseable, dialect);
-    return { ok: !!(parsed.ok && !parsed.usedFallbackDialect), mode: 'ast', error: parsed.ok ? null : parsed.error };
+    const ok = !!(parsed.ok && !parsed.usedFallbackDialect);
+    return {
+      ok, mode: 'ast',
+      error: ok ? null : (parsed.usedFallbackDialect ? parsed.primaryError : parsed.error),
+      usedFallbackDialect: parsed.usedFallbackDialect || null,
+    };
   }
   const tokens = lex(sql);
   const kind = tokens.find((t) => t.depth === 0 && t.kind === 'word');
@@ -313,5 +592,8 @@ function applyColumns(updateSql, columns) {
     `SET ${selected.map((c) => `${c.trim()} = <value>`).join(', ')}`);
 }
 
-globalThis.SQLMeganeDmlBuilder = { convert, applyColumns, REASON_CODES, _internal: { lex, syntaxCheck } };
+globalThis.SQLMeganeDmlBuilder = {
+  convert, inspect, convertByKey, applyColumns, REASON_CODES,
+  _internal: { lex, syntaxCheck, innerSelect, byKeyInvariants, outputColumnsFromTokens, collectAstTables },
+};
 })();

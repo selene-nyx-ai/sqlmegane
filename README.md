@@ -69,7 +69,29 @@ DELETE: `t_log` の全行を削除します
 
 単一の基底表を読む SELECT から、同じ対象条件を持つ UPDATE、DELETE、候補行数 SELECT を作れます。WHERE 句は入力からそのまま切り出し、UPDATE の SET は `<column> = <value>` のまま提示します。生成 SQL は必ず読み返してから使ってください。候補行数は実更新行数ではなく、同時更新やトランザクション分離レベルによって変わります。
 
-v1 は外側の FROM が単一テーブルの SELECT だけが対象です。JOIN、カンマ結合、CTE、派生表、集合演算、集約、行数制限、ロック句など、意味を保てると証明できない形では SQL を生成せず理由を表示します。JOIN 付き変換は今後の対象です。構文確認と、WHERE・対象表・他テーブル参照に関する不変条件を別々に表示します。
+v1 は外側の FROM が単一テーブルの SELECT だけが対象です。JOIN、カンマ結合、CTE、派生表、集合演算、集約、行数制限、ロック句など、意味を保てると証明できない形では SQL を生成せず理由を表示します。構文確認と、WHERE・対象表・他テーブル参照に関する不変条件を別々に表示します。
+
+### キー IN 形（対象表とキー列を選ぶ）
+
+第 2 弾では、CTE・JOIN・集計を含む分析 SELECT を書き換えず、最終 SELECT が出力するキー列を使って対象表を絞れます。画面の「対象表とキーを選んで変換する」で基底表（または自由入力した表）とキーを選びます。最終 SELECT にキーがなければ、先に `product_id` などを出力列へ追加してください。
+
+```sql
+DELETE FROM products
+WHERE product_id IN (
+  SELECT product_id
+  FROM (WITH ... SELECT product_id, ... FROM ranked WHERE ...) sqlmegane_src
+);
+```
+
+この形で同値とする範囲は「元の SELECT の結果にキー値が現れる、対象表の行」です。JOIN 条件や WHERE 条件を移動せず、元の SELECT 全体を派生表へ 1 回だけ入れます。最終 SELECT の `ORDER BY` は `IN` の集合には影響せず、派生表内では不要または使えないため除き、生成 SQL のコメントに記録します。
+
+次の点を生成結果にも黄色の注記で表示します。
+
+- キーが `NULL` の行は `IN` で一致せず、更新・削除されません。
+- サブクエリは DML 実行時に再評価されるため、先に確認した SELECT の結果から変わることがあります。
+- 自由入力した対象表が元 SELECT にない場合は、表とキーの対応を確認してください。
+
+MySQL / PostgreSQL / SQL Server では、同梱パーサで `FROM (WITH ... SELECT ...) sqlmegane_src` を含む生成文を再解析します。方言に合う単純な CTE では 3 方言ともこの派生表形を読み取れます。ただし、元 SELECT 自体に別方言の構文があれば構文確認は失敗します（上の PostgreSQL 例をそのまま MySQL / SQL Server として確認した場合の `INTERVAL '90 days'` など）。Oracle / 汎用は AST パーサがないため簡易構文確認です。Oracle は DML の先頭に `WITH` を置けないため、この派生表形を使います。接続先の製品・バージョンで派生表内の `WITH` が使えるかも実行前に確認してください。
 
 注意: 生成した SQL は必ず読み返してから使ってください。候補行数 SELECT は結合後の候補件数の目安で、実際の影響行数ではありません。別名付きの SELECT から作った DELETE は、MySQL では 8.0.16 以降の構文（`DELETE FROM t AS a`）になります。それより前の MySQL では別名を外してください。CLI の `convert` は、生成物の自己検証で danger / warning が出た場合に標準エラーへ表示します（WHERE の無い SELECT から作った DML など）。
 
@@ -86,6 +108,9 @@ CLI からも利用できます。
 ```sh
 printf "SELECT id FROM m_users WHERE id = 1;" | node cli/sqlmegane.mjs convert --to update --dialect mysql --columns name,status -
 printf "SELECT id FROM m_users WHERE id = 1;" | node cli/sqlmegane.mjs convert --to delete --dialect oracle --safe-block sqlplus-interactive -
+node cli/sqlmegane.mjs inspect --dialect postgres report.sql
+node cli/sqlmegane.mjs convert --to delete --dialect postgres --target products --by-key product_id report.sql
+# 対象表のキー名が出力名と違う場合: --target-key id
 node cli/sqlmegane.mjs template --kind upsert --dialect postgres --lang ja
 ```
 

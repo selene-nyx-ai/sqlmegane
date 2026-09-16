@@ -41,7 +41,29 @@ Verification SELECT: SELECT COUNT(*) FROM m_users WHERE last_login < '2024-01-01
 
 For a SELECT whose outer FROM contains one base table, SQLMegane can build an UPDATE, a DELETE, and a candidate row count SELECT with the same filter. The WHERE text is copied from the source, and UPDATE keeps `<column> = <value>` as an explicit placeholder. Always read generated SQL before using it. The candidate count is not the actual affected row count and can change because of concurrent work and transaction isolation.
 
-The first version accepts single-table queries only. It returns a reason without SQL for JOINs, comma joins, CTEs, derived tables, set operations, aggregation, row limits, locking clauses, and other forms whose meaning cannot be proven to carry over. JOIN conversion is planned for a later version. Syntax checking and the WHERE, target table, and other-table invariants are reported separately.
+The first version accepts single-table queries only. It returns a reason without SQL for JOINs, comma joins, CTEs, derived tables, set operations, aggregation, row limits, locking clauses, and other forms whose meaning cannot be proven to carry over. Syntax checking and the WHERE, target table, and other-table invariants are reported separately.
+
+### Key IN form: choose the target table and key
+
+The second form preserves an analytical SELECT containing CTEs, JOINs, and aggregation. Choose a base table (or enter another table) and a key returned by the final SELECT. Add a key such as `product_id` to the final output first if it is missing.
+
+```sql
+DELETE FROM products
+WHERE product_id IN (
+  SELECT product_id
+  FROM (WITH ... SELECT product_id, ... FROM ranked WHERE ...) sqlmegane_src
+);
+```
+
+Its equivalence is defined as: rows in the target table whose key value appears in the original SELECT result. SQLMegane does not move JOIN or WHERE conditions. It places the complete SELECT in one derived table. It removes the final SELECT's `ORDER BY`, which does not affect membership in the `IN` set and may be rejected inside a derived table, and records the removal in a generated comment.
+
+The generated result shows these warnings:
+
+- A `NULL` key does not match `IN`, so that row is not updated or deleted.
+- The subquery is evaluated again when the DML runs and may differ from the SELECT result checked earlier.
+- When the entered target is absent from the source query, check the table and key mapping.
+
+For MySQL, PostgreSQL, and SQL Server, the bundled parser checks the generated statement containing `FROM (WITH ... SELECT ...) sqlmegane_src`. All three parsers accept this derived-table form when the CTE uses syntax for that dialect. The check still fails when the original SELECT contains syntax from another dialect, such as PostgreSQL's `INTERVAL '90 days'` in a query checked as MySQL or SQL Server. Oracle and Generic have basic syntax checks only. Oracle cannot put `WITH` before DML, so this feature uses the derived-table form. Verify support for `WITH` inside a derived table on the database product and version you run.
 
 Always read the generated SQL before using it. The candidate count SELECT is an estimate of matching rows, not the affected-row count. A DELETE built from an aliased SELECT uses MySQL 8.0.16+ syntax (`DELETE FROM t AS a`); drop the alias on older MySQL. The CLI `convert` command prints danger and warning findings from the self-check to stderr (for example, DML built from a SELECT without WHERE).
 
@@ -56,6 +78,9 @@ Converted DML can be copied with a transaction start, the original SELECT, candi
 ```sh
 printf "SELECT id FROM m_users WHERE id = 1;" | node cli/sqlmegane.mjs convert --to update --dialect mysql --columns name,status -
 printf "SELECT id FROM m_users WHERE id = 1;" | node cli/sqlmegane.mjs convert --to delete --dialect oracle --safe-block sqlplus-interactive -
+node cli/sqlmegane.mjs inspect --dialect postgres report.sql
+node cli/sqlmegane.mjs convert --to delete --dialect postgres --target products --by-key product_id report.sql
+# If the target key has a different name: --target-key id
 node cli/sqlmegane.mjs template --kind upsert --dialect postgres --lang en
 ```
 
