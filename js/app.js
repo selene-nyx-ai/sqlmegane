@@ -795,13 +795,27 @@ function renderDmlBuilder(sql, dialect) {
   const inspection = DmlBuilder.inspect(sql, { dialect });
   const card = el('details', { className: 'statement-card conversion-card', attrs: { open: '' } });
   card.appendChild(el('summary', { className: 'conversion-title', text: t('ui.buildDml') }));
-  if (converted.status !== 'ok') {
-    for (const code of converted.reasonCodes || [converted.reasonCode]) {
-      card.appendChild(el('p', { className: 'conversion-error', text: t(`dml.reason.${code}`, converted.reasonParams) }));
-    }
-    card.appendChild(el('p', { className: 'hint', text: t('dml.hint.singleTable') }));
-  } else appendConvertedStages(card, converted, dialect);
-  if (inspection.status === 'ok' && (converted.status !== 'ok' || inspection.tables.length > 1)) appendByKeyChooser(card, sql, dialect, inspection);
+  const byKeyAvailable = inspection.status === 'ok' && (converted.status !== 'ok' || inspection.tables.length > 1);
+  if (converted.status === 'ok') {
+    appendConvertedStages(card, converted, dialect);
+    if (byKeyAvailable) appendByKeyChooser(card, sql, dialect, inspection);
+    return card;
+  }
+  const reasonCodes = converted.reasonCodes || [converted.reasonCode];
+  if (byKeyAvailable) {
+    // 単一テーブル版が使えなくても「キー IN 形」で変換できる。導線を主役にし、使えない理由は折りたたみに降ろす
+    // （赤い「変換できません」が先頭にあると非対応に見える、というしぐれさんの指摘 2026-09-16）。
+    card.appendChild(el('p', { className: 'conversion-lead', text: t('ui.byKeyLead') }));
+    appendByKeyChooser(card, sql, dialect, inspection);
+    const why = el('details', { className: 'conversion-step conversion-why' });
+    why.appendChild(el('summary', { text: t('ui.singleTableReasons', { count: reasonCodes.length }) }));
+    for (const code of reasonCodes) why.appendChild(el('p', { className: 'conversion-error', text: t(`dml.reason.${code}`, converted.reasonParams) }));
+    why.appendChild(el('p', { className: 'hint', text: t('dml.hint.singleTable') }));
+    card.appendChild(why);
+    return card;
+  }
+  for (const code of reasonCodes) card.appendChild(el('p', { className: 'conversion-error', text: t(`dml.reason.${code}`, converted.reasonParams) }));
+  card.appendChild(el('p', { className: 'hint', text: t('dml.hint.singleTable') }));
   return card;
 }
 
