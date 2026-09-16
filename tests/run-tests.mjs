@@ -2590,6 +2590,26 @@ test('CLI convert: Oracle SQLPlus wrapper defaults to rollback', () => {
   assert.match(r.stdout, /^ROLLBACK;$/m); assert.doesNotMatch(r.stdout, /^COMMIT;$/m);
 });
 
+test('dml-builder: 変換できない理由は全部 reasonCodes に集める（先頭が reasonCode）', () => {
+  const B = globalThis.SQLMeganeDmlBuilder;
+  const r = B.convert('SELECT a.id, COUNT(*) FROM a JOIN b ON a.id = b.a_id GROUP BY a.id LIMIT 5', { dialect: 'mysql' });
+  assert.equal(r.status, 'unsupported');
+  assert.equal(r.reasonCode, r.reasonCodes[0]);
+  assert.deepEqual([...r.reasonCodes].sort(), ['grouping', 'join-unsupported-v1', 'row-limit']);
+  const cte = B.convert('WITH x AS (SELECT 1 AS id) SELECT id FROM x WHERE id = 1', { dialect: 'postgres' });
+  assert.deepEqual(cte.reasonCodes, ['cte-unsupported-v1']);
+  const ok = B.convert('SELECT id FROM t WHERE id = 1', { dialect: 'postgres' });
+  assert.equal(ok.status, 'ok');
+});
+
+test('CLI convert: 変換不可のとき理由を全部と単一テーブル化のヒントを stderr に出す', () => {
+  const r = runCli(['convert', '--to', 'delete', '--dialect', 'mysql', '-'], 'SELECT a.id FROM a JOIN b ON a.id = b.a_id LIMIT 5');
+  assert.equal(r.status, 3);
+  assert.ok(r.stderr.includes('LIMIT') && r.stderr.includes('JOIN'), r.stderr);
+  assert.ok(r.stderr.includes('IN ('), r.stderr);
+  assert.equal(r.stdout, '');
+});
+
 // ---------------------------------------------------------------------------
 // 結果表示
 // ---------------------------------------------------------------------------

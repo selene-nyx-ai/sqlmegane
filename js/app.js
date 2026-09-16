@@ -686,7 +686,10 @@ function renderDmlBuilder(sql, dialect) {
   const card = el('details', { className: 'statement-card conversion-card', attrs: { open: '' } });
   card.appendChild(el('summary', { className: 'conversion-title', text: t('ui.buildDml') }));
   if (converted.status !== 'ok') {
-    card.appendChild(el('p', { className: 'conversion-error', text: t(`dml.reason.${converted.reasonCode}`, converted.reasonParams) }));
+    for (const code of converted.reasonCodes || [converted.reasonCode]) {
+      card.appendChild(el('p', { className: 'conversion-error', text: t(`dml.reason.${code}`, converted.reasonParams) }));
+    }
+    card.appendChild(el('p', { className: 'hint', text: t('dml.hint.singleTable') }));
     return card;
   }
   const proven = converted.equivalence === 'proven';

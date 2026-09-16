@@ -87,9 +87,10 @@ function hasSeq(tokens, words) {
   const top = tokens.filter((t) => t.depth === 0);
   return top.some((_, i) => words.every((w, j) => top[i + j] && top[i + j].upper === w));
 }
-function unsupported(reasonCode, original, reasonParams) {
+function unsupported(reasonCode, original, reasonParams, reasonCodes) {
   return {
-    status: 'unsupported', reasonCode, reasonParams: reasonParams || {}, target: null,
+    status: 'unsupported', reasonCode, reasonCodes: reasonCodes && reasonCodes.length ? reasonCodes : [reasonCode],
+    reasonParams: reasonParams || {}, target: null,
     original, delete: null, update: null, countSelect: null, columnCandidates: [],
     equivalence: 'unsupported', invariants: { whereOnce: false, targetOnce: false, noOtherTables: false },
     warnings: [], syntaxCheck: null,
@@ -205,22 +206,29 @@ function convert(sqlText, options) {
   const statement = statements[0].trim();
   const tokens = lex(statement);
   const top = tokens.filter((t) => t.depth === 0);
-  if (!top[0] || top[0].upper !== 'SELECT') {
-    if (top[0] && top[0].upper === 'WITH') return unsupported('cte-unsupported-v1', original);
-    return unsupported('not-single-select', original);
-  }
-  if (hasSeq(tokens, ['UNION']) || hasSeq(tokens, ['INTERSECT']) || hasSeq(tokens, ['EXCEPT']) || hasSeq(tokens, ['MINUS'])) return unsupported('set-operation', original);
-  if (top.some((t) => ['LIMIT', 'OFFSET', 'FETCH', 'TOP'].includes(t.upper))) return unsupported('row-limit', original);
-  if (hasSeq(tokens, ['FOR', 'UPDATE']) || hasSeq(tokens, ['FOR', 'SHARE'])) return unsupported('lock-clause', original);
+  if (!top[0] || (top[0].upper !== 'SELECT' && top[0].upper !== 'WITH')) return unsupported('not-single-select', original);
+  // 変換できない理由は 1 つ目で止めず全部集める（利用者が SELECT を書き直す時に、直す箇所が一度で分かるように）。
+  // reasonCode は互換のため先頭の 1 つ、reasonCodes に全件。
+  const reasons = [];
+  const isCte = top[0].upper === 'WITH';
+  if (isCte) reasons.push('cte-unsupported-v1');
+  if (hasSeq(tokens, ['UNION']) || hasSeq(tokens, ['INTERSECT']) || hasSeq(tokens, ['EXCEPT']) || hasSeq(tokens, ['MINUS'])) reasons.push('set-operation');
+  if (top.some((t) => ['LIMIT', 'OFFSET', 'FETCH', 'TOP'].includes(t.upper))) reasons.push('row-limit');
+  if (hasSeq(tokens, ['FOR', 'UPDATE']) || hasSeq(tokens, ['FOR', 'SHARE'])) reasons.push('lock-clause');
   if (top.some((t) => ['CONNECT', 'MODEL', 'MATCH_RECOGNIZE', 'PIVOT', 'UNPIVOT', 'TABLESAMPLE'].includes(t.upper))
-      || hasSeq(tokens, ['START', 'WITH'])) return unsupported('hierarchical-or-special', original);
+      || (!isCte && hasSeq(tokens, ['START', 'WITH']))) reasons.push('hierarchical-or-special');
   if (top.some((t) => ['DISTINCT', 'HAVING', 'QUALIFY', 'ROLLUP', 'CUBE'].includes(t.upper)) || hasSeq(tokens, ['GROUP', 'BY']) || hasSeq(tokens, ['GROUPING', 'SETS'])
       || top.some((t, i) => ['COUNT', 'SUM', 'AVG', 'MIN', 'MAX', 'LISTAGG', 'STRING_AGG', 'ARRAY_AGG', 'JSON_AGG'].includes(t.upper) && top[i + 1] && top[i + 1].text === '(')
-      || top.some((t) => t.upper === 'OVER')) return unsupported('grouping', original);
-  const selectIndex = tokens.indexOf(top[0]);
-  const fromIndex = tokens.findIndex((t) => t.depth === 0 && t.upper === 'FROM');
-  if (fromIndex < 0) return unsupported('parse-failed', original);
-  if (tokens.slice(selectIndex + 1, fromIndex).some((t) => t.depth === 0 && t.upper === 'INTO')) return unsupported('select-into', original);
+      || top.some((t) => t.upper === 'OVER')) reasons.push('grouping');
+  // CTE の場合、外側の SELECT は最後の depth 0 の SELECT。JOIN 等の判定はその外側ブロックで行う
+  const selectTop = isCte ? [...top].reverse().find((t) => t.upper === 'SELECT') : top[0];
+  const selectIndex = selectTop ? tokens.indexOf(selectTop) : -1;
+  const fromIndex = selectIndex >= 0 ? tokens.findIndex((t, i) => i > selectIndex && t.depth === 0 && t.upper === 'FROM') : -1;
+  if (fromIndex < 0) {
+    reasons.push('parse-failed');
+    return unsupported(reasons[0], original, {}, reasons);
+  }
+  if (tokens.slice(selectIndex + 1, fromIndex).some((t) => t.depth === 0 && t.upper === 'INTO')) reasons.push('select-into');
   const whereIndex = tokens.findIndex((t, i) => i > fromIndex && t.depth === 0 && t.upper === 'WHERE');
   const orderIndex = tokens.findIndex((t, i) => i > fromIndex && t.depth === 0 && t.upper === 'ORDER' && tokens[i + 1] && tokens[i + 1].depth === 0 && tokens[i + 1].upper === 'BY');
   const clauseStart = [whereIndex, orderIndex].filter((x) => x >= 0).reduce((a, b) => Math.min(a, b), tokens.length);
@@ -230,10 +238,11 @@ function convert(sqlText, options) {
     && tokens[i + 1] && tokens[i + 1].text === '+' && tokens[i + 1].depth === 1
     && tokens[i + 2] && tokens[i + 2].text === ')' && tokens[i + 2].depth === 0);
   if (sourceTop.some((t) => t.text === ',' || /JOIN/.test(t.upper) || ['NATURAL', 'USING'].includes(t.upper)) || hasOracleOuterJoin) {
-    return unsupported('join-unsupported-v1', original);
+    reasons.push('join-unsupported-v1');
   }
-  const target = parseTable(statement, tokens, fromIndex, endPos);
-  if (target.error) return unsupported(target.error, original);
+  const target = reasons.includes('join-unsupported-v1') ? { error: null } : parseTable(statement, tokens, fromIndex, endPos);
+  if (target.error && !reasons.includes(target.error)) reasons.push(target.error);
+  if (reasons.length) return unsupported(reasons[0], original, {}, [...new Set(reasons)]);
 
   const Ast = globalThis.SQLMeganeSqlAst;
   if (['mysql', 'postgres', 'mssql'].includes(dialect) && Ast && Ast.isAvailable(dialect)) {

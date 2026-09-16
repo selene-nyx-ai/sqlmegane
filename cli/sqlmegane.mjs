@@ -384,7 +384,10 @@ async function runSubcommand(command, argv) {
   const converted = DmlBuilder.convert(sql, { dialect, oracleVersion: opts.oracleVersion });
   if (converted.status !== 'ok') {
     if (opts.json) process.stdout.write(JSON.stringify({ status: converted.status, reasonCode: converted.reasonCode, sql: null, target: null, dialect, oracleVersion: opts.oracleVersion, placeholders: [], equivalence: converted.equivalence }) + '\n');
-    else process.stderr.write(t(`dml.reason.${converted.reasonCode}`, converted.reasonParams) + '\n');
+    else {
+      for (const code of converted.reasonCodes || [converted.reasonCode]) process.stderr.write(t(`dml.reason.${code}`, converted.reasonParams) + '\n');
+      process.stderr.write(t('dml.hint.singleTable') + '\n');
+    }
     process.exitCode = 3; return;
   }
   const dml = opts.to === 'delete' ? converted.delete : DmlBuilder.applyColumns(converted.update, opts.columns);
