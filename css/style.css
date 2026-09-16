@@ -1022,3 +1022,9 @@ body {
 .conversion-fold > summary > strong { flex: none; }
 .conversion-preview { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; opacity: 0.7; font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; font-size: 0.86em; }
 .conversion-fold > pre, .conversion-fold > .column-candidates { margin: 0 16px 14px; }
+
+/* 折りたたみ見出しは「押せる行」と分かるように地色を変え、ホバーで明るくする（しぐれさん指摘 2026-09-17） */
+.conversion-fold > summary { background: var(--bg-elevated); border-left: 3px solid var(--accent); transition: background 0.12s ease; }
+.conversion-fold > summary:hover { background: var(--panel-border-soft); }
+.conversion-fold[open] > summary { background: var(--panel-border-soft); border-left-color: var(--accent-strong); }
+.conversion-fold > summary::before { color: var(--accent); }
