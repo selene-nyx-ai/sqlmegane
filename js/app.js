@@ -79,6 +79,9 @@ const PARSER_LABELS = {
 
 let debounceTimer = null;
 let showDmlBuilder = false;
+// キー IN 形の選択状態。入力のたびに再描画されても、選んだ表・キーが消えないように保持する
+// （しぐれさん要望 2026-09-16「貼ったら勝手に解析してほしい」への対応で自動描画にしたため）。
+const byKeyState = { table: null, other: '', outputKey: null, targetKey: '', converted: false };
 
 function el(tag, opts) {
   const node = document.createElement(tag);
@@ -713,12 +716,32 @@ function appendByKeyChooser(card, sql, dialect, inspection) {
   const targetLabel = el('label', { text: t('ui.byKeyTargetKey') });
   const targetInput = el('input', { attrs: { type: 'text', value: outputSelect.value } });
   targetLabel.appendChild(targetInput); keyField.append(outputLabel, targetLabel); section.appendChild(keyField);
-  outputSelect.addEventListener('change', () => { targetInput.value = outputSelect.value; });
-  otherInput.addEventListener('focus', () => { otherRadio.checked = true; });
+  // 前回の選択を復元（自動再描画で選択が消えないように）
+  if (byKeyState.table) {
+    const prev = radios.find((x) => x.value === byKeyState.table);
+    if (prev) prev.checked = true;
+  }
+  if (byKeyState.other) otherInput.value = byKeyState.other;
+  if (byKeyState.outputKey && outputColumns.some((c) => c.name === byKeyState.outputKey)) outputSelect.value = byKeyState.outputKey;
+  targetInput.value = byKeyState.targetKey || outputSelect.value;
+  const remember = () => {
+    const selected = radios.find((x) => x.checked);
+    byKeyState.table = selected ? selected.value : null;
+    byKeyState.other = otherInput.value;
+    byKeyState.outputKey = outputSelect.value;
+    byKeyState.targetKey = targetInput.value.trim();
+  };
+  outputSelect.addEventListener('change', () => { targetInput.value = outputSelect.value; remember(); });
+  otherInput.addEventListener('focus', () => { otherRadio.checked = true; remember(); });
+  otherInput.addEventListener('input', remember);
+  targetInput.addEventListener('input', remember);
+  for (const r of radios) r.addEventListener('change', remember);
 
   const button = el('button', { className: 'btn btn-primary', text: t('ui.byKeyConvert'), attrs: { type: 'button' } });
   const result = el('div', { className: 'by-key-result' });
   button.addEventListener('click', () => {
+    remember();
+    byKeyState.converted = true;
     const selected = radios.find((x) => x.checked);
     const targetTable = selected && selected.value === '__other__' ? otherInput.value.trim() : (selected ? selected.value : '');
     if (!targetTable) { result.replaceChildren(el('p', { className: 'conversion-error', text: t('ui.byKeyChooseTable') })); return; }
@@ -734,6 +757,8 @@ function appendByKeyChooser(card, sql, dialect, inspection) {
     appendConvertedStages(result, converted, dialect);
   });
   section.append(button, result); card.appendChild(section);
+  // 一度変換したあとに SELECT を直した（例: 出力にキー列を足した）ときは、選択を保ったまま自動で作り直す
+  if (byKeyState.converted && radios.some((x) => x.checked)) button.click();
 }
 
 function appendConvertedStages(card, converted, dialect) {
@@ -867,7 +892,9 @@ function render() {
   // 判定バナー: 結果エリアの一番先頭（textareaの直下）に常に表示する。
   // プロダクトオーナー指摘「スクロールしないと全部見きれない」への対応で、
   // 危険/注意/情報の件数がスクロールなしで即わかることを最優先する。
-  if (showDmlBuilder) els.results.appendChild(renderDmlBuilder(sql, dialect));
+  // SELECT 1 文なら「更新文を作る」はボタンを押さなくても自動で出す（貼るだけで次の一手が見える）
+  const autoDml = result.statements.length === 1 && result.statements[0].kind === 'SELECT';
+  if (showDmlBuilder || autoDml) els.results.appendChild(renderDmlBuilder(sql, dialect));
   els.results.appendChild(renderVerdictBanner(result));
 
   if (autoDetection) {
@@ -896,7 +923,13 @@ function scheduleAutoAnalyze() {
 }
 
 els.analyzeBtn.addEventListener('click', render);
-els.buildDmlBtn.addEventListener('click', () => { showDmlBuilder = true; render(); });
+els.buildDmlBtn.addEventListener('click', () => {
+  showDmlBuilder = true;
+  render();
+  // 押したらカードまでスクロールする（結果が下にあるのに気づけない、というしぐれさん指摘）
+  const card = els.results.querySelector('.conversion-card');
+  if (card && typeof card.scrollIntoView === 'function') card.scrollIntoView({ behavior: 'smooth', block: 'start' });
+});
 function refreshControls() {
   els.oracleVersionWrap.hidden = els.dialect.value !== 'oracle';
   const result = analyzeSQL(els.input.value, els.dialect.value === 'auto' ? 'generic' : els.dialect.value, { oracleVersion: els.oracleVersion.value });
