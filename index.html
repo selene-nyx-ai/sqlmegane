@@ -51,6 +51,13 @@
           <option value="mysql">MySQL</option>
           <option value="postgres">PostgreSQL</option>
         </select>
+        <span id="oracle-version-wrap" class="conditional-control" hidden>
+          <label for="oracle-version-select" data-i18n="ui.oracleVersion">Oracle バージョン</label>
+          <select id="oracle-version-select">
+            <option value="legacy" selected data-i18n="ui.oracleLegacy">21c 以前</option>
+            <option value="23" data-i18n="ui.oracle23">23c 以降</option>
+          </select>
+        </span>
       </div>
     </div>
 
@@ -67,6 +74,7 @@
 
     <div class="input-panel-actions">
       <button id="analyze-btn" type="button" class="btn btn-primary" data-i18n="ui.analyze">解析する</button>
+      <button id="build-dml-btn" type="button" class="btn btn-primary" data-i18n="ui.buildDml" disabled>更新文を作る</button>
       <button id="clear-btn" type="button" class="btn btn-ghost" data-i18n="ui.clear">クリア</button>
       <span id="auto-analyze-hint" class="hint" data-i18n="ui.autoHint">入力中も自動でチェックします</span>
     </div>
@@ -75,6 +83,16 @@
   <section id="results" class="results" aria-live="polite">
     <p class="empty-state" data-i18n="ui.empty">SQLを貼り付けると、ここに解析結果が表示されます。</p>
   </section>
+
+  <details class="panel templates-panel">
+    <summary data-i18n="ui.templates">型紙</summary>
+    <p class="hint" data-i18n="ui.templatesHelp">入力欄を変更せず、選んだ型紙をプレビューします。</p>
+    <div id="template-buttons" class="template-buttons"></div>
+    <div id="template-preview" class="template-preview" hidden>
+      <div class="conversion-head"><strong id="template-title"></strong><button id="template-copy" type="button" class="btn btn-copy" data-i18n="ui.copy">コピー</button></div>
+      <pre id="template-sql"></pre>
+    </div>
+  </details>
 
   <section class="about-panel">
     <h2 data-i18n="ui.aboutTitle">これは何？</h2>
@@ -150,6 +168,8 @@
 <script src="js/plsql-extract.js"></script>
 <script src="js/analyzer.js"></script>
 <script src="js/dialect-detect.js"></script>
+<script src="js/dml-builder.js"></script>
+<script src="js/templates.js"></script>
 <script src="js/app.js"></script>
 </body>
 </html>

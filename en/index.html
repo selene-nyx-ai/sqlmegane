@@ -51,6 +51,13 @@
           <option value="mysql">MySQL</option>
           <option value="postgres">PostgreSQL</option>
         </select>
+        <span id="oracle-version-wrap" class="conditional-control" hidden>
+          <label for="oracle-version-select" data-i18n="ui.oracleVersion">Oracle version</label>
+          <select id="oracle-version-select">
+            <option value="legacy" selected data-i18n="ui.oracleLegacy">21c or earlier</option>
+            <option value="23" data-i18n="ui.oracle23">23c or later</option>
+          </select>
+        </span>
       </div>
     </div>
 
@@ -67,6 +74,7 @@
 
     <div class="input-panel-actions">
       <button id="analyze-btn" type="button" class="btn btn-primary" data-i18n="ui.analyze">Analyze</button>
+      <button id="build-dml-btn" type="button" class="btn btn-primary" data-i18n="ui.buildDml" disabled>Build update statements</button>
       <button id="clear-btn" type="button" class="btn btn-ghost" data-i18n="ui.clear">Clear</button>
       <span id="auto-analyze-hint" class="hint" data-i18n="ui.autoHint">Analysis updates automatically as you type</span>
     </div>
@@ -75,6 +83,16 @@
   <section id="results" class="results" aria-live="polite">
     <p class="empty-state" data-i18n="ui.empty">Paste SQL to see the analysis here.</p>
   </section>
+
+  <details class="panel templates-panel">
+    <summary data-i18n="ui.templates">Templates</summary>
+    <p class="hint" data-i18n="ui.templatesHelp">Preview a template without changing the SQL input.</p>
+    <div id="template-buttons" class="template-buttons"></div>
+    <div id="template-preview" class="template-preview" hidden>
+      <div class="conversion-head"><strong id="template-title"></strong><button id="template-copy" type="button" class="btn btn-copy" data-i18n="ui.copy">Copy</button></div>
+      <pre id="template-sql"></pre>
+    </div>
+  </details>
 
   <section class="about-panel">
     <h2 data-i18n="ui.aboutTitle">What is this?</h2>
@@ -116,6 +134,8 @@
 <script src="../js/plsql-extract.js"></script>
 <script src="../js/analyzer.js"></script>
 <script src="../js/dialect-detect.js"></script>
+<script src="../js/dml-builder.js"></script>
+<script src="../js/templates.js"></script>
 <script src="../js/app.js"></script>
 </body>
 </html>

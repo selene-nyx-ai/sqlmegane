@@ -65,6 +65,30 @@ DELETE: `t_log` の全行を削除します
 
 ## 方言ごとの解析レベル
 
+## 更新文を作る（SELECT → UPDATE/DELETE）
+
+単一の基底表を読む SELECT から、同じ対象条件を持つ UPDATE、DELETE、候補行数 SELECT を作れます。WHERE 句は入力からそのまま切り出し、UPDATE の SET は `<column> = <value>` のまま提示します。生成 SQL は必ず読み返してから使ってください。候補行数は実更新行数ではなく、同時更新やトランザクション分離レベルによって変わります。
+
+v1 は外側の FROM が単一テーブルの SELECT だけが対象です。JOIN、カンマ結合、CTE、派生表、集合演算、集約、行数制限、ロック句など、意味を保てると証明できない形では SQL を生成せず理由を表示します。JOIN 付き変換は今後の対象です。構文確認と、WHERE・対象表・他テーブル参照に関する不変条件を別々に表示します。
+
+注意: 生成した SQL は必ず読み返してから使ってください。候補行数 SELECT は結合後の候補件数の目安で、実際の影響行数ではありません。別名付きの SELECT から作った DELETE は、MySQL では 8.0.16 以降の構文（`DELETE FROM t AS a`）になります。それより前の MySQL では別名を外してください。CLI の `convert` は、生成物の自己検証で danger / warning が出た場合に標準エラーへ表示します（WHERE の無い SELECT から作った DML など）。
+
+## 型紙
+
+UPDATE、DELETE、INSERT SELECT、UPSERT / MERGE、CREATE TABLE の方言別型紙を入力欄とは別のプレビューで確認できます。型紙の入力箇所は `<table>`、`<column>`、`<value>`、`<condition>`、`<key>`、`<source>` です。これらが SQL の文字列・コメント以外に残っている場合は danger として指摘します。
+
+## 安全実行の枠
+
+変換した DML を、トランザクション開始、元 SELECT、候補行数、DML、影響行数確認、既定の ROLLBACK の順にまとめてコピーできます。確定版は確認ダイアログを経て COMMIT を含む形でコピーします。1 つの出力に実行可能な COMMIT と ROLLBACK は同時に入りません。Oracle では SQL\*Plus 対話用とバッチ用も選べます。同じトランザクション内でも同じ行集合は保証されないため、必要に応じて分離レベルやロックを設計してください。
+
+CLI からも利用できます。
+
+```sh
+printf "SELECT id FROM m_users WHERE id = 1;" | node cli/sqlmegane.mjs convert --to update --dialect mysql --columns name,status -
+printf "SELECT id FROM m_users WHERE id = 1;" | node cli/sqlmegane.mjs convert --to delete --dialect oracle --safe-block sqlplus-interactive -
+node cli/sqlmegane.mjs template --kind upsert --dialect postgres --lang ja
+```
+
 | 方言の選択 | 解析 | 日本語要約 | 使うパーサ |
 |---|---|---|---|
 | MySQL | 構文解析（AST） | あり | 同梱 node-sql-parser（mysql） |

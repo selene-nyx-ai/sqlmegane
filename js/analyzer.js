@@ -1719,8 +1719,45 @@ function buildRawStatements(text, dialect) {
   return out;
 }
 
-function analyzeSQL(fullText, dialect) {
+function topLevelWordList(masked) {
+  const words = [];
+  let depth = 0;
+  let i = 0;
+  while (i < masked.length) {
+    const c = masked[i];
+    if (c === '(') { depth++; i++; continue; }
+    if (c === ')') { depth = Math.max(0, depth - 1); i++; continue; }
+    if (depth === 0 && /[A-Za-z_]/.test(c)) {
+      const start = i++;
+      while (i < masked.length && /[A-Za-z0-9_$#]/.test(masked[i])) i++;
+      words.push({ word: masked.slice(start, i).toUpperCase(), start });
+      continue;
+    }
+    i++;
+  }
+  return words;
+}
+
+function isVendorJoinDml(raw, dialect) {
+  const values = topLevelWordList(scan(raw, dialect).masked).map((x) => x.word);
+  if (!values.length) return false;
+  if (values[0] === 'UPDATE') {
+    const set = values.indexOf('SET');
+    if (set < 0) return false;
+    const join = values.indexOf('JOIN', 1);
+    return (join > 0 && join < set) || values.indexOf('FROM', set + 1) > set;
+  }
+  if (values[0] === 'DELETE') {
+    const from = values.indexOf('FROM');
+    if (from < 0) return false;
+    return values.indexOf('USING', from + 1) > from || (from > 1 && values.indexOf('JOIN', from + 1) > from);
+  }
+  return false;
+}
+
+function analyzeSQL(fullText, dialect, options) {
   const d = dialect || 'generic';
+  const analysisOptions = options || {};
   const text = fullText || '';
   const rawStatements = buildRawStatements(text, d);
   const isSingleStatementPaste = rawStatements.length === 1;
@@ -1736,6 +1773,24 @@ function analyzeSQL(fullText, dialect) {
     const raw = entry.raw;
     const result = analyzeStatement(raw, d, { isPlsqlUnit: entry.isPlsqlUnit });
     const { kind, findings } = result;
+
+    const placeholderNames = [...new Set((scan(raw, d).masked.match(/<[a-z_]+>/g) || []))];
+    if (placeholderNames.length > 0) {
+      const finding = mk('danger', 'unfilled-placeholder', '未記入のプレースホルダ',
+        `未記入のプレースホルダがあります: ${placeholderNames.join(', ')}`);
+      finding.message = I18n.t('finding.unfilled-placeholder.message', { placeholders: placeholderNames.join(', ') });
+      findings.push(finding);
+    }
+    if ((d === 'oracle' || d === 'generic') && isVendorJoinDml(raw, d)) {
+      if (d === 'oracle' && (analysisOptions.oracleVersion || 'legacy') === 'legacy') {
+        findings.push(mk('warning', 'dialect-join-dml-unsupported',
+          'Oracle 21c 以前では使えない結合 DML 構文',
+          'Oracle 21c 以前にはこの結合更新の形はありません。EXISTS 形か MERGE を使ってください。'));
+      } else if (d === 'generic') {
+        findings.push(mk('info', 'vendor-specific-join-dml', '製品固有の結合 DML 構文',
+          '製品固有の結合更新構文です（PostgreSQL / MySQL / SQL Server / Oracle 23c 以降のいずれか）。接続先の製品で使えるか確認してください。'));
+      }
+    }
 
     if (kind === 'BEGIN_TX') {
       txOpen = true;

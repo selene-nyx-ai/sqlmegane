@@ -38,10 +38,14 @@ import '../js/ast-rules.js';
 import '../js/plsql-extract.js';
 import '../js/analyzer.js';
 import '../js/dialect-detect.js';
+import '../js/dml-builder.js';
+import '../js/templates.js';
 
 const { analyzeSQL, SEVERITY_ORDER } = globalThis.SQLMeganeAnalyzer;
 const { summaryToLines } = globalThis.SQLMeganeSummarizer;
 const { detectDialect } = globalThis.SQLMeganeDialectDetect;
+const DmlBuilder = globalThis.SQLMeganeDmlBuilder;
+const Templates = globalThis.SQLMeganeTemplates;
 const I18n = globalThis.SQLMeganeI18n;
 const t = (key, params) => I18n.t(key, params);
 
@@ -60,6 +64,7 @@ function usageText() {
     `使い方: node cli/${me} [オプション] [--] [ファイル.sql | -]`,
     '',
     '  --dialect <auto|generic|mysql|postgres|mssql|oracle>  方言（既定: auto）',
+    '  --oracle-version <legacy|23>                          Oracle バージョン（既定: legacy）',
     '  --lang <ja|en>                                        出力言語（既定: ja）',
     '  --json                                                 JSON で出力',
     '  --fail-on <danger|warning|info|never>                  終了コード 2 にする重要度の閾値（既定: danger）',
@@ -73,7 +78,7 @@ function usageText() {
 }
 
 function parseArgs(argv) {
-  const opts = { dialect: 'auto', lang: 'ja', json: false, failOn: 'danger', includeSql: false, maxBytes: DEFAULT_MAX_BYTES, file: null, help: false };
+  const opts = { dialect: 'auto', oracleVersion: 'legacy', lang: 'ja', json: false, failOn: 'danger', includeSql: false, maxBytes: DEFAULT_MAX_BYTES, file: null, help: false };
   const takeValue = (name, i) => {
     const v = argv[i + 1];
     if (v === undefined || (v.startsWith('-') && v !== '-')) throw new UsageError(I18n.getLocale() === 'en' ? t('cli.err.value', { option: name }) : `${name} には値が必要です。`);
@@ -89,6 +94,8 @@ function parseArgs(argv) {
       else if (a === '--include-sql') opts.includeSql = true;
       else if (a === '--dialect') opts.dialect = takeValue(a, i++);
       else if (a.startsWith('--dialect=')) opts.dialect = a.slice('--dialect='.length);
+      else if (a === '--oracle-version') opts.oracleVersion = takeValue(a, i++);
+      else if (a.startsWith('--oracle-version=')) opts.oracleVersion = a.slice('--oracle-version='.length);
       else if (a === '--lang') { opts.lang = takeValue(a, i++); I18n.setLocale(opts.lang); }
       else if (a.startsWith('--lang=')) { opts.lang = a.slice('--lang='.length); I18n.setLocale(opts.lang); }
       else if (a === '--fail-on') opts.failOn = takeValue(a, i++);
@@ -102,6 +109,7 @@ function parseArgs(argv) {
     opts.file = a;
   }
   if (!DIALECTS.includes(opts.dialect)) throw new UsageError(I18n.getLocale() === 'en' ? t('cli.err.dialect', { values: DIALECTS.join(', '), value: opts.dialect }) : `--dialect は ${DIALECTS.join(' / ')} のいずれかです: ${opts.dialect}`);
+  if (!['legacy', '23'].includes(opts.oracleVersion)) throw new UsageError('--oracle-version must be legacy or 23');
   if (!I18n.locales.includes(opts.lang)) throw new UsageError(I18n.getLocale() === 'en' ? t('cli.err.lang') : '--lang は ja / en のいずれかです。');
   if (!FAIL_ON.includes(opts.failOn)) throw new UsageError(I18n.getLocale() === 'en' ? t('cli.err.failOn', { values: FAIL_ON.join(', '), value: opts.failOn }) : `--fail-on は ${FAIL_ON.join(' / ')} のいずれかです: ${opts.failOn}`);
   if (!Number.isInteger(opts.maxBytes) || opts.maxBytes <= 0) throw new UsageError(I18n.getLocale() === 'en' ? t('cli.err.maxBytes') : '--max-bytes は正の整数で指定してください。');
@@ -300,8 +308,113 @@ function installEpipeHandler() {
   }
 }
 
+function parseSubcommand(argv, command) {
+  const out = {
+    command, to: null, kind: null, dialect: command === 'convert' ? 'auto' : 'generic',
+    oracleVersion: 'legacy', columns: [], safeBlock: null, commit: false,
+    lang: 'ja', json: false, maxBytes: DEFAULT_MAX_BYTES, file: null,
+  };
+  let positionalOnly = false;
+  const value = (name, index) => {
+    const v = argv[index + 1];
+    if (v === undefined || (v.startsWith('-') && v !== '-')) throw new UsageError(`${name} requires a value`);
+    return v;
+  };
+  for (let i = 0; i < argv.length; i++) {
+    const a = argv[i];
+    if (!positionalOnly && a === '--') { positionalOnly = true; continue; }
+    if (!positionalOnly && a.startsWith('--')) {
+      const eq = a.indexOf('=');
+      const name = eq >= 0 ? a.slice(0, eq) : a;
+      const take = () => eq >= 0 ? a.slice(eq + 1) : value(name, i++);
+      if (name === '--to') out.to = take();
+      else if (name === '--kind') out.kind = take();
+      else if (name === '--dialect') out.dialect = take();
+      else if (name === '--oracle-version') out.oracleVersion = take();
+      else if (name === '--columns') out.columns = take().split(',').map((x) => x.trim()).filter(Boolean);
+      else if (name === '--safe-block') out.safeBlock = take();
+      else if (name === '--lang') out.lang = take();
+      else if (name === '--max-bytes') out.maxBytes = Number(take());
+      else if (name === '--commit') out.commit = true;
+      else if (name === '--json') out.json = true;
+      else throw new UsageError(`Unknown option: ${name}`);
+      continue;
+    }
+    if (out.file !== null) throw new UsageError('Only one input file may be specified');
+    out.file = a;
+  }
+  if (!['generic', 'mysql', 'postgres', 'mssql', 'oracle', 'auto'].includes(out.dialect)) throw new UsageError(`Invalid dialect: ${out.dialect}`);
+  if (!['legacy', '23'].includes(out.oracleVersion)) throw new UsageError('--oracle-version must be legacy or 23');
+  if (!['ja', 'en'].includes(out.lang)) throw new UsageError('--lang must be ja or en');
+  if (!Number.isInteger(out.maxBytes) || out.maxBytes <= 0) throw new UsageError('--max-bytes must be a positive integer');
+  if (command === 'convert') {
+    if (!['update', 'delete'].includes(out.to)) throw new UsageError('--to must be update or delete');
+    if (out.safeBlock && !['generic', 'sqlplus-interactive', 'sqlplus-batch'].includes(out.safeBlock)) throw new UsageError('Invalid --safe-block client');
+  } else {
+    if (!['update', 'delete', 'insert-select', 'upsert', 'merge', 'create-table', 'safe-block'].includes(out.kind)) throw new UsageError('Invalid or missing --kind');
+    if (out.dialect === 'auto') throw new UsageError('template requires an explicit dialect');
+  }
+  return out;
+}
+
+async function runSubcommand(command, argv) {
+  let opts;
+  try { opts = parseSubcommand(argv, command); I18n.setLocale(opts.lang); }
+  catch (err) { process.stderr.write(`${err.message}\n`); process.exitCode = 1; return; }
+  if (command === 'template') {
+    process.stdout.write(Templates.get(opts.kind, opts.dialect, { oracleVersion: opts.oracleVersion, locale: opts.lang }) + '\n');
+    process.exitCode = 0;
+    return;
+  }
+  let sql;
+  try { sql = await readInput(opts.file, opts.maxBytes); }
+  catch (err) { process.stderr.write(`${err.message}\n`); process.exitCode = 1; return; }
+  if (!sql.trim()) { process.stderr.write((opts.lang === 'en' ? 'SQL input is empty.' : 'SQL が空です。') + '\n'); process.exitCode = 1; return; }
+  let dialect = opts.dialect;
+  if (dialect === 'auto') {
+    const detected = detectDialect(sql);
+    if (!detected || ['parse-success-ambiguous', 'undetermined', 'empty'].includes(detected.reason)) {
+      const reasonCode = 'dialect-ambiguous';
+      if (opts.json) process.stdout.write(JSON.stringify({ status: 'unsupported', reasonCode, sql: null, target: null, dialect: 'auto', oracleVersion: opts.oracleVersion, placeholders: [], equivalence: 'unsupported' }) + '\n');
+      else process.stderr.write(t(`dml.reason.${reasonCode}`) + '\n');
+      process.exitCode = 4; return;
+    }
+    dialect = detected.dialect;
+  }
+  const converted = DmlBuilder.convert(sql, { dialect, oracleVersion: opts.oracleVersion });
+  if (converted.status !== 'ok') {
+    if (opts.json) process.stdout.write(JSON.stringify({ status: converted.status, reasonCode: converted.reasonCode, sql: null, target: null, dialect, oracleVersion: opts.oracleVersion, placeholders: [], equivalence: converted.equivalence }) + '\n');
+    else process.stderr.write(t(`dml.reason.${converted.reasonCode}`, converted.reasonParams) + '\n');
+    process.exitCode = 3; return;
+  }
+  const dml = opts.to === 'delete' ? converted.delete : DmlBuilder.applyColumns(converted.update, opts.columns);
+  // 生成物の自己検証: 危険・警告の指摘（WHERE 無しの DML など）は stderr に出す。stdout は SQL だけ。
+  const selfCheck = analyzeSQL(dml, dialect, { oracleVersion: opts.oracleVersion });
+  // プレースホルダ未記入は convert の生成物では前提（利用者が埋める）なので、ここでは除く
+  const selfFindings = selfCheck.statements.flatMap((s) => s.findings)
+    .filter((f) => (f.severity === 'danger' || f.severity === 'warning') && f.code !== 'unfilled-placeholder');
+  if (!opts.json) for (const f of selfFindings) process.stderr.write(`${findingLine(f)}\n`);
+  let output = dml;
+  if (opts.safeBlock) output = Templates.buildSafeBlock({ dialect, client: opts.safeBlock, originalSelect: converted.original, countSelect: converted.countSelect, dml: output, locale: opts.lang, commit: opts.commit });
+  if (opts.json) {
+    const placeholders = [...new Set(output.match(/<[a-z_]+>/g) || [])];
+    process.stdout.write(JSON.stringify({
+      status: 'ok', reasonCode: null, sql: output, target: converted.target, dialect, oracleVersion: opts.oracleVersion,
+      placeholders, equivalence: converted.equivalence, invariants: converted.invariants,
+      columnCandidates: converted.columnCandidates, warnings: converted.warnings,
+      selfCheck: selfFindings.map((f) => ({ severity: f.severity, code: f.code, title: f.title })),
+    }) + '\n');
+  } else process.stdout.write(output.replace(/\s+$/, '') + '\n');
+  process.exitCode = 0;
+}
+
 async function main() {
   installEpipeHandler();
+  const rawArgs = process.argv.slice(2);
+  if (rawArgs[0] === 'convert' || rawArgs[0] === 'template') {
+    await runSubcommand(rawArgs[0], rawArgs.slice(1));
+    return;
+  }
   let opts;
   try {
     opts = parseArgs(process.argv.slice(2));
@@ -342,7 +455,7 @@ async function main() {
       detected = detectDialect(sql);
       dialect = detected.dialect || 'generic';
     }
-    const result = analyzeSQL(sql, dialect);
+    const result = analyzeSQL(sql, dialect, { oracleVersion: opts.oracleVersion });
     applyAmbiguousFilter(result, detected);
     plain = toPlain(result, opts.includeSql);
   } catch (err) {

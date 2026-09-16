@@ -24,11 +24,15 @@ import '../js/ast-rules.js';
 import '../js/plsql-extract.js';
 import '../js/analyzer.js';
 import '../js/dialect-detect.js';
+import '../js/dml-builder.js';
+import '../js/templates.js';
 
 const { analyzeSQL, splitStatements, _internal } = globalThis.SQLMeganeAnalyzer;
 const PlsqlExtract = globalThis.SQLMeganePlsqlExtract;
 const { summarize, summaryToLines } = globalThis.SQLMeganeSummarizer;
 const { detectDialect } = globalThis.SQLMeganeDialectDetect;
+const DmlBuilder = globalThis.SQLMeganeDmlBuilder;
+const Templates = globalThis.SQLMeganeTemplates;
 
 /** 要約を1本のテキストにして部分一致で検証しやすくする */
 function summaryText(stmt) {
@@ -2448,6 +2452,142 @@ test('en/index.html は英語が静的に焼き込まれ、インラインスク
   const body = html.slice(html.indexOf('<body'));
   const jpLines = body.split(String.fromCharCode(10)).filter((l) => jp.test(l) && !/^\s*(<!--|[^<]*-->|同梱パーサ|js\/vendor|ライセンス)/.test(l));
   assert.deepEqual(jpLines.map((l) => l.trim().slice(0, 40)), ['<div><a href="../" lang="ja" data-i18n="'], '日本語が残るのは日本語ページへのリンクだけ');
+});
+
+// ---------------------------------------------------------------------------
+// SELECT -> DML / templates / safe execution wrapper
+// ---------------------------------------------------------------------------
+
+for (const dialect of ['mysql', 'postgres', 'mssql', 'oracle', 'generic']) {
+  test(`DML builder: ${dialect} single table`, () => {
+    const r = DmlBuilder.convert('SELECT id, name FROM app.users WHERE active = 1;', { dialect });
+    assert.equal(r.status, 'ok'); assert.equal(r.equivalence, 'proven');
+    assert.deepEqual(r.columnCandidates, ['id', 'name']); assert.ok(r.delete.includes('WHERE active = 1'));
+  });
+  test(`DML builder: ${dialect} alias and subquery`, () => {
+    const r = DmlBuilder.convert('SELECT u.id FROM users u WHERE u.id IN (SELECT user_id FROM logs WHERE ok = 1) ORDER BY u.id;', { dialect });
+    assert.equal(r.status, 'ok'); assert.ok(r.delete.includes('SELECT user_id FROM logs WHERE ok = 1'));
+  });
+  test(`DML builder: ${dialect} no WHERE`, () => {
+    const r = DmlBuilder.convert('SELECT id FROM users;', { dialect });
+    assert.equal(r.status, 'ok'); assert.ok(!r.delete.includes(' WHERE '));
+    assert.ok(analyzeSQL(r.delete, dialect).statements[0].findings.some((f) => f.code === 'no-where-delete'));
+  });
+  test(`templates: ${dialect} placeholders only`, () => {
+    for (const kind of ['update', 'delete', 'insert-select', 'upsert', 'merge', 'create-table', 'safe-block']) {
+      const sql = Templates.get(kind, dialect, { locale: 'en' });
+      assert.ok(!/(:x\b|@x\b|\$1\b|\?)/.test(sql), `${dialect}/${kind}`);
+      assert.ok([...(sql.matchAll(/<([^>]+)>/g))].every((m) => ['table', 'column', 'value', 'condition', 'key', 'source'].includes(m[1])));
+    }
+  });
+}
+
+const rejected = {
+  'join-unsupported-v1': 'SELECT t.id FROM t JOIN u ON u.id=t.id',
+  'row-limit': 'SELECT id FROM t LIMIT 1',
+  grouping: 'SELECT COUNT(id) FROM t',
+  'set-operation': 'SELECT id FROM t UNION SELECT id FROM u',
+  'cte-unsupported-v1': 'WITH q AS (SELECT id FROM t) SELECT id FROM q',
+  'derived-table': 'SELECT id FROM (SELECT id FROM t) q',
+  'hierarchical-or-special': 'SELECT id FROM t CONNECT BY PRIOR id = parent_id',
+  'lock-clause': 'SELECT id FROM t FOR UPDATE',
+  'select-into': 'SELECT id INTO x FROM t',
+  'not-single-select': 'SELECT id FROM t; SELECT id FROM u',
+};
+for (const [reason, sql] of Object.entries(rejected)) {
+  test(`DML builder rejects ${reason}`, () => assert.equal(DmlBuilder.convert(sql, { dialect: 'generic' }).reasonCode, reason));
+}
+
+test('DML builder: quoted target and column candidates', () => {
+  const r = DmlBuilder.convert('SELECT "u"."id", name, name || suffix AS display, *, 1 FROM "app"."users" AS "u" WHERE "u"."id" = 1;', { dialect: 'postgres' });
+  assert.equal(r.status, 'ok'); assert.deepEqual(r.columnCandidates, ['"id"', 'name']); assert.equal(r.target.table, '"app"."users"');
+});
+test('DML builder: applyColumns replaces only SET placeholder', () => {
+  assert.match(DmlBuilder.applyColumns('UPDATE t SET <column> = <value> WHERE id=1;', ['a', 'b']), /SET a = <value>, b = <value>/);
+});
+test('DML builder: MySQL output drops LIMIT', () => {
+  assert.equal(DmlBuilder.convert('SELECT id FROM t LIMIT 1', { dialect: 'mysql' }).reasonCode, 'row-limit');
+});
+test('DML builder: ambiguous auto dialect', () => {
+  assert.equal(DmlBuilder.convert('SELECT id FROM t WHERE id=1', { dialect: 'auto' }).reasonCode, 'dialect-ambiguous');
+});
+
+for (const [dialect, version, code] of [['oracle', 'legacy', 'dialect-join-dml-unsupported'], ['generic', 'legacy', 'vendor-specific-join-dml']]) {
+  test(`join DML finding: ${dialect}`, () => assert.ok(analyzeSQL('UPDATE t SET c=1 FROM u WHERE t.id=u.id', dialect, { oracleVersion: version }).statements[0].findings.some((f) => f.code === code)));
+}
+test('join DML finding: Oracle 23 has no legacy warning', () => assert.ok(!analyzeSQL('UPDATE t SET c=1 FROM u WHERE t.id=u.id', 'oracle', { oracleVersion: '23' }).statements[0].findings.some((f) => f.code === 'dialect-join-dml-unsupported')));
+for (const dialect of ['mysql', 'postgres', 'mssql']) test(`join DML finding: no cross-dialect warning for ${dialect}`, () => assert.ok(!analyzeSQL('UPDATE t SET c=1 FROM u WHERE t.id=u.id', dialect).statements[0].findings.some((f) => /join-dml/.test(f.code))));
+test('join DML finding ignores subquery/comment/string', () => {
+  for (const sql of ["UPDATE t SET x=(SELECT y FROM u WHERE id=1) WHERE id=1", "UPDATE t SET x='FROM u USING z' WHERE id=1", 'UPDATE t SET x=1 /* FROM u */ WHERE id=1']) assert.ok(!analyzeSQL(sql, 'generic').statements[0].findings.some((f) => f.code === 'vendor-specific-join-dml'));
+});
+test('unfilled placeholder finding excludes strings and comments', () => {
+  assert.ok(analyzeSQL('UPDATE t SET c=<value> WHERE id=1', 'mysql').statements[0].findings.some((f) => f.code === 'unfilled-placeholder' && f.severity === 'danger'));
+  assert.ok(!analyzeSQL("SELECT '<value>' /* <table> */ FROM t", 'mysql').statements[0].findings.some((f) => f.code === 'unfilled-placeholder'));
+});
+
+for (const dialect of ['mysql', 'postgres', 'mssql', 'oracle', 'generic']) {
+  test(`safe block: ${dialect} rollback/commit exclusivity`, () => {
+    const base = { dialect, originalSelect: 'SELECT id FROM t;', countSelect: 'SELECT COUNT(*) FROM t;', dml: 'DELETE FROM t;', locale: 'en' };
+    const rollback = Templates.buildSafeBlock(base); const commit = Templates.buildSafeBlock({ ...base, commit: true });
+    assert.match(rollback, /^ROLLBACK;$/m); assert.doesNotMatch(rollback, /^COMMIT;$/m);
+    assert.match(commit, /^COMMIT;$/m); assert.doesNotMatch(commit, /^ROLLBACK;$/m);
+    if (dialect === 'oracle') assert.doesNotMatch(rollback, /^BEGIN(?:;|\s)/m);
+  });
+}
+test('safe block: SQLPlus modes and affected rows', () => {
+  const base = { dialect: 'oracle', originalSelect: 'SELECT id FROM t;', countSelect: 'SELECT COUNT(*) FROM t;', dml: 'DELETE FROM t;' };
+  const interactive = Templates.buildSafeBlock({ ...base, client: 'sqlplus-interactive' });
+  assert.match(interactive, /SET EXITCOMMIT OFF/); assert.doesNotMatch(interactive, /^EXIT(?:\s|$)/m);
+  const batch = Templates.buildSafeBlock({ ...base, client: 'sqlplus-batch' });
+  assert.match(batch, /WHENEVER SQLERROR/); assert.match(batch, /WHENEVER OSERROR/); assert.match(batch, /EXIT ROLLBACK\s*$/);
+  assert.match(Templates.buildSafeBlock({ ...base, dialect: 'mysql' }), /ROW_COUNT/);
+  assert.match(Templates.buildSafeBlock({ ...base, dialect: 'mssql' }), /@@ROWCOUNT/);
+});
+test('English template and wrapper comments contain no Japanese', () => {
+  const text = Templates.get('safe-block', 'generic', { locale: 'en' });
+  assert.doesNotMatch(text, /[\u3040-\u30ff\u3400-\u9fff]/);
+  globalThis.SQLMeganeI18n.setLocale('ja');
+});
+test('CLI convert: SQL-only stdout and exit codes 0/3/4', () => {
+  const ok = runCli(['convert', '--to', 'delete', '--dialect', 'mysql', '-'], 'SELECT id FROM t WHERE id=1');
+  assert.equal(ok.status, 0, ok.stderr); assert.equal(ok.stdout.trim(), 'DELETE FROM t WHERE id=1;');
+  const unsupported = runCli(['convert', '--to', 'delete', '--dialect', 'mysql', '-'], 'SELECT t.id FROM t JOIN u ON u.id=t.id');
+  assert.equal(unsupported.status, 3); assert.ok(unsupported.stderr.trim());
+  const ambiguous = runCli(['convert', '--to', 'delete', '--dialect', 'auto', '-'], 'SELECT id FROM t WHERE id=1');
+  assert.equal(ambiguous.status, 4);
+});
+test('CLI convert: JSON schema and columns', () => {
+  const r = runCli(['convert', '--to', 'update', '--dialect', 'mysql', '--columns', 'name,status', '--json', '-'], 'SELECT id FROM t WHERE id=1');
+  assert.equal(r.status, 0, r.stderr); const value = JSON.parse(r.stdout);
+  assert.deepEqual(Object.keys(value), ['status', 'reasonCode', 'sql', 'target', 'dialect', 'oracleVersion', 'placeholders', 'equivalence', 'invariants', 'columnCandidates', 'warnings', 'selfCheck']);
+  assert.match(value.sql, /SET name = <value>, status = <value>/);
+  assert.deepEqual(value.invariants, { whereOnce: true, targetOnce: true, noOtherTables: true });
+  assert.ok(!value.selfCheck.some((f) => f.code === 'unfilled-placeholder'), 'convert の生成物ではプレースホルダ未記入を自己検証に含めない');
+});
+test('CLI convert: WHERE の無い SELECT から作った DML は stderr に danger を出す（stdout は SQL のみ）', () => {
+  const r = runCli(['convert', '--to', 'delete', '--dialect', 'mysql', '-'], 'SELECT id FROM t');
+  assert.equal(r.status, 0, r.stderr);
+  assert.equal(r.stdout.trim(), 'DELETE FROM t;');
+  assert.ok(r.stderr.includes('WHERE'), r.stderr);
+});
+test('dml-builder: invariants は実際に数えて判定する（対象表と同名の別名では targetOnce が偽になる）', () => {
+  const B = globalThis.SQLMeganeDmlBuilder;
+  const ok = B.convert("SELECT id FROM app.users u WHERE u.id = 1", { dialect: 'postgres' });
+  assert.equal(ok.equivalence, 'proven');
+  assert.deepEqual(ok.invariants, { whereOnce: true, targetOnce: true, noOtherTables: true });
+  const dup = B.convert('SELECT id FROM users users WHERE users.id = 1', { dialect: 'postgres' });
+  assert.equal(dup.status, 'ok');
+  assert.equal(dup.invariants.targetOnce, false);
+  assert.equal(dup.equivalence, 'unsupported');
+});
+test('CLI template: emits the selected dialect template', () => {
+  const r = runCli(['template', '--kind', 'upsert', '--dialect', 'postgres', '--lang', 'en']);
+  assert.equal(r.status, 0, r.stderr); assert.match(r.stdout, /ON CONFLICT/);
+});
+test('CLI convert: Oracle SQLPlus wrapper defaults to rollback', () => {
+  const r = runCli(['convert', '--to', 'update', '--dialect', 'oracle', '--safe-block', 'sqlplus-interactive', '-'], 'SELECT id FROM t WHERE id=1');
+  assert.equal(r.status, 0, r.stderr); assert.match(r.stdout, /SET EXITCOMMIT OFF/);
+  assert.match(r.stdout, /^ROLLBACK;$/m); assert.doesNotMatch(r.stdout, /^COMMIT;$/m);
 });
 
 // ---------------------------------------------------------------------------

@@ -10,6 +10,8 @@
 
 const { analyzeSQL, collectPlsqlFindings } = globalThis.SQLMeganeAnalyzer;
 const { detectDialect } = globalThis.SQLMeganeDialectDetect || {};
+const DmlBuilder = globalThis.SQLMeganeDmlBuilder;
+const Templates = globalThis.SQLMeganeTemplates;
 const I18n = globalThis.SQLMeganeI18n;
 const t = (key, params) => I18n.t(key, params);
 
@@ -30,6 +32,14 @@ const els = {
   analyzeBtn: document.getElementById('analyze-btn'),
   clearBtn: document.getElementById('clear-btn'),
   results: document.getElementById('results'),
+  buildDmlBtn: document.getElementById('build-dml-btn'),
+  oracleVersion: document.getElementById('oracle-version-select'),
+  oracleVersionWrap: document.getElementById('oracle-version-wrap'),
+  templateButtons: document.getElementById('template-buttons'),
+  templatePreview: document.getElementById('template-preview'),
+  templateTitle: document.getElementById('template-title'),
+  templateSql: document.getElementById('template-sql'),
+  templateCopy: document.getElementById('template-copy'),
 };
 
 const KIND_LABELS = {
@@ -68,6 +78,7 @@ const PARSER_LABELS = {
 };
 
 let debounceTimer = null;
+let showDmlBuilder = false;
 
 function el(tag, opts) {
   const node = document.createElement(tag);
@@ -658,6 +669,76 @@ function renderGlobalFindings(globalFindings) {
   return wrap;
 }
 
+function sqlCopyBlock(label, sql, enabled) {
+  const wrap = el('div', { className: 'conversion-step' });
+  const head = el('div', { className: 'conversion-head' });
+  head.appendChild(el('strong', { text: label }));
+  const button = el('button', { className: 'btn btn-copy', text: t('ui.copy'), attrs: { type: 'button' } });
+  button.disabled = enabled === false;
+  if (enabled !== false) button.addEventListener('click', () => copyToClipboard(sql, button));
+  head.appendChild(button); wrap.appendChild(head);
+  wrap.appendChild(el('pre', { text: sql }));
+  return wrap;
+}
+
+function renderDmlBuilder(sql, dialect) {
+  const converted = DmlBuilder.convert(sql, { dialect, oracleVersion: els.oracleVersion.value });
+  const card = el('details', { className: 'statement-card conversion-card', attrs: { open: '' } });
+  card.appendChild(el('summary', { className: 'conversion-title', text: t('ui.buildDml') }));
+  if (converted.status !== 'ok') {
+    card.appendChild(el('p', { className: 'conversion-error', text: t(`dml.reason.${converted.reasonCode}`, converted.reasonParams) }));
+    return card;
+  }
+  const proven = converted.equivalence === 'proven';
+  card.appendChild(sqlCopyBlock(t('ui.stepOriginal'), converted.original, true));
+  card.appendChild(sqlCopyBlock(t('ui.stepCount'), converted.countSelect, true));
+  card.appendChild(sqlCopyBlock(t('ui.stepDelete'), converted.delete, proven));
+
+  const updateStep = el('div', { className: 'conversion-step' });
+  const candidateHead = el('div', { className: 'conversion-head' });
+  candidateHead.appendChild(el('strong', { text: t('ui.stepUpdate') }));
+  const choices = el('div', { className: 'column-candidates' });
+  const updatePre = el('pre', { text: converted.update });
+  const updateCopy = el('button', { className: 'btn btn-copy', text: t('ui.copy'), attrs: { type: 'button' } });
+  const selectedColumns = () => [...choices.querySelectorAll('input:checked')].map((x) => x.value);
+  const refreshUpdate = () => { updatePre.textContent = DmlBuilder.applyColumns(converted.update, selectedColumns()); };
+  for (const column of converted.columnCandidates) {
+    const label = el('label', { className: 'column-choice' });
+    const input = el('input', { attrs: { type: 'checkbox', value: column } });
+    input.addEventListener('change', refreshUpdate);
+    label.append(input, document.createTextNode(column)); choices.appendChild(label);
+  }
+  updateCopy.disabled = !proven;
+  updateCopy.addEventListener('click', () => copyToClipboard(updatePre.textContent, updateCopy));
+  candidateHead.appendChild(updateCopy); updateStep.appendChild(candidateHead); updateStep.appendChild(choices); updateStep.appendChild(updatePre); card.appendChild(updateStep);
+
+  const syntaxOk = Object.values(converted.syntaxCheck || {}).every((x) => x && x.ok);
+  card.appendChild(el('p', { className: 'conversion-step', text: syntaxOk ? t('ui.syntaxCheckOk') : t('ui.syntaxCheckFailed') }));
+
+  const verification = el('details', { className: 'conversion-step' });
+  verification.appendChild(el('summary', { text: t('ui.selfCheck') }));
+  const checked = analyzeSQL(`${converted.delete}\n${updatePre.textContent}`, dialect, { oracleVersion: els.oracleVersion.value });
+  for (const statement of checked.statements) verification.appendChild(renderStatementCard(statement, dialect));
+  card.appendChild(verification);
+
+  const safe = el('div', { className: 'conversion-step safe-actions' });
+  const dmlChoice = el('select', { attrs: { 'aria-label': t('ui.safeDml') } });
+  dmlChoice.appendChild(el('option', { text: 'UPDATE', attrs: { value: 'update' } }));
+  dmlChoice.appendChild(el('option', { text: 'DELETE', attrs: { value: 'delete' } }));
+  safe.appendChild(dmlChoice);
+  const client = el('select', { attrs: { 'aria-label': t('ui.client') } });
+  for (const [value, key] of [['generic', 'ui.clientGeneric'], ['sqlplus-interactive', 'ui.clientInteractive'], ['sqlplus-batch', 'ui.clientBatch']]) client.appendChild(el('option', { text: t(key), attrs: { value } }));
+  client.hidden = dialect !== 'oracle'; safe.appendChild(client);
+  const safeText = (commit) => Templates.buildSafeBlock({ dialect, client: client.value, originalSelect: converted.original, countSelect: converted.countSelect, dml: dmlChoice.value === 'delete' ? converted.delete : updatePre.textContent, locale: I18n.getLocale(), commit });
+  const rollbackButton = el('button', { className: 'btn btn-primary', text: t('ui.copySafeRollback'), attrs: { type: 'button' } });
+  rollbackButton.disabled = !proven; rollbackButton.addEventListener('click', () => copyToClipboard(safeText(false), rollbackButton)); safe.appendChild(rollbackButton);
+  const commitButton = el('button', { className: 'btn btn-ghost', text: t('ui.copySafeCommit'), attrs: { type: 'button' } });
+  commitButton.disabled = !proven;
+  commitButton.addEventListener('click', () => { if (globalThis.confirm(t('ui.commitConfirm'))) copyToClipboard(safeText(true), commitButton); }); safe.appendChild(commitButton);
+  card.appendChild(safe);
+  return card;
+}
+
 function render() {
   const sql = els.input.value;
   const selectedDialect = els.dialect.value;
@@ -680,7 +761,7 @@ function render() {
     dialect = (autoDetection && autoDetection.dialect) || 'generic';
   }
 
-  const result = analyzeSQL(sql, dialect);
+  const result = analyzeSQL(sql, dialect, { oracleVersion: els.oracleVersion.value });
 
   if (result.statements.length === 0) {
     els.results.appendChild(el('p', { className: 'empty-state', text: t('ui.noValidSql') }));
@@ -706,6 +787,7 @@ function render() {
   // 判定バナー: 結果エリアの一番先頭（textareaの直下）に常に表示する。
   // プロダクトオーナー指摘「スクロールしないと全部見きれない」への対応で、
   // 危険/注意/情報の件数がスクロールなしで即わかることを最優先する。
+  if (showDmlBuilder) els.results.appendChild(renderDmlBuilder(sql, dialect));
   els.results.appendChild(renderVerdictBanner(result));
 
   if (autoDetection) {
@@ -727,17 +809,43 @@ function render() {
 }
 
 function scheduleAutoAnalyze() {
+  showDmlBuilder = false;
+  refreshControls();
   clearTimeout(debounceTimer);
   debounceTimer = setTimeout(render, 350);
 }
 
 els.analyzeBtn.addEventListener('click', render);
-els.dialect.addEventListener('change', render);
+els.buildDmlBtn.addEventListener('click', () => { showDmlBuilder = true; render(); });
+function refreshControls() {
+  els.oracleVersionWrap.hidden = els.dialect.value !== 'oracle';
+  const result = analyzeSQL(els.input.value, els.dialect.value === 'auto' ? 'generic' : els.dialect.value, { oracleVersion: els.oracleVersion.value });
+  const enabled = result.statements.length === 1 && result.statements[0].kind === 'SELECT';
+  els.buildDmlBtn.disabled = !enabled;
+  els.buildDmlBtn.title = enabled ? '' : t('ui.buildDmlDisabled');
+}
+els.dialect.addEventListener('change', () => { showDmlBuilder = false; refreshControls(); render(); });
+els.oracleVersion.addEventListener('change', render);
 els.input.addEventListener('input', scheduleAutoAnalyze);
 els.clearBtn.addEventListener('click', () => {
   els.input.value = '';
+  showDmlBuilder = false;
+  refreshControls();
   render();
   els.input.focus();
 });
+const TEMPLATE_KINDS = ['update', 'delete', 'insert-select', 'upsert', 'merge', 'create-table', 'safe-block'];
+for (const kind of TEMPLATE_KINDS) {
+  const button = el('button', { className: 'btn btn-ghost', text: t(`ui.template.${kind}`), attrs: { type: 'button' } });
+  button.addEventListener('click', () => {
+    const dialect = els.dialect.value === 'auto' ? 'generic' : els.dialect.value;
+    els.templateTitle.textContent = t(`ui.template.${kind}`);
+    els.templateSql.textContent = Templates.get(kind, dialect, { oracleVersion: els.oracleVersion.value, locale: I18n.getLocale() });
+    els.templatePreview.hidden = false;
+  });
+  els.templateButtons.appendChild(button);
+}
+els.templateCopy.addEventListener('click', () => copyToClipboard(els.templateSql.textContent, els.templateCopy));
+refreshControls();
 // 初期表示
 render();

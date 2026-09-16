@@ -37,6 +37,28 @@ Verification SELECT: SELECT COUNT(*) FROM m_users WHERE last_login < '2024-01-01
 
 ## Dialect support
 
+## Build UPDATE / DELETE from SELECT
+
+For a SELECT whose outer FROM contains one base table, SQLMegane can build an UPDATE, a DELETE, and a candidate row count SELECT with the same filter. The WHERE text is copied from the source, and UPDATE keeps `<column> = <value>` as an explicit placeholder. Always read generated SQL before using it. The candidate count is not the actual affected row count and can change because of concurrent work and transaction isolation.
+
+The first version accepts single-table queries only. It returns a reason without SQL for JOINs, comma joins, CTEs, derived tables, set operations, aggregation, row limits, locking clauses, and other forms whose meaning cannot be proven to carry over. JOIN conversion is planned for a later version. Syntax checking and the WHERE, target table, and other-table invariants are reported separately.
+
+Always read the generated SQL before using it. The candidate count SELECT is an estimate of matching rows, not the affected-row count. A DELETE built from an aliased SELECT uses MySQL 8.0.16+ syntax (`DELETE FROM t AS a`); drop the alias on older MySQL. The CLI `convert` command prints danger and warning findings from the self-check to stderr (for example, DML built from a SELECT without WHERE).
+
+## Templates
+
+Dialect-specific templates are available for UPDATE, DELETE, INSERT SELECT, UPSERT / MERGE, and CREATE TABLE. They appear in a separate preview and do not replace the current input. Fillable locations use only `<table>`, `<column>`, `<value>`, `<condition>`, `<key>`, and `<source>`. An unfilled placeholder outside strings and comments is reported as danger.
+
+## Safe execution wrapper
+
+Converted DML can be copied with a transaction start, the original SELECT, candidate count, DML, affected-row check, and a default ROLLBACK. The commit version requires confirmation and contains COMMIT instead. A wrapper never contains both an executable COMMIT and an executable ROLLBACK. Oracle also supports SQL\*Plus interactive and batch wrappers. A transaction alone does not guarantee the same row set; choose isolation and locking where needed.
+
+```sh
+printf "SELECT id FROM m_users WHERE id = 1;" | node cli/sqlmegane.mjs convert --to update --dialect mysql --columns name,status -
+printf "SELECT id FROM m_users WHERE id = 1;" | node cli/sqlmegane.mjs convert --to delete --dialect oracle --safe-block sqlplus-interactive -
+node cli/sqlmegane.mjs template --kind upsert --dialect postgres --lang en
+```
+
 | Dialect selected | Analysis | English summary | Parser |
 |---|---|---|---|
 | MySQL | Parsed SQL (AST) | yes | bundled node-sql-parser (mysql) |
