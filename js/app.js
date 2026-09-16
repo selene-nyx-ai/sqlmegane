@@ -672,16 +672,34 @@ function renderGlobalFindings(globalFindings) {
   return wrap;
 }
 
-function sqlCopyBlock(label, sql, enabled) {
-  const wrap = el('div', { className: 'conversion-step' });
-  const head = el('div', { className: 'conversion-head' });
+/** 生成 SQL の 1 行目（コメント行を除く）を短く切ったプレビュー。折りたたんだままでも中身の見当がつくように */
+function sqlPreview(sql) {
+  const line = String(sql || '').split('\n').map((l) => l.trim()).find((l) => l && !l.startsWith('--')) || '';
+  return line.length > 90 ? `${line.slice(0, 90)}…` : line;
+}
+
+/**
+ * 折りたたみ式の SQL ブロック。見出し行にコピーボタンと 1 行プレビューを置き、開かなくてもコピーできる
+ * （変換後の SQL でページが縦長になる、というしぐれさん指摘 2026-09-17。既定は全部閉じる）。
+ */
+function foldedSqlBlock(label, getSql, enabled, extraBody) {
+  const wrap = el('details', { className: 'conversion-step conversion-fold' });
+  const head = el('summary', { className: 'conversion-head' });
   head.appendChild(el('strong', { text: label }));
+  const preview = el('span', { className: 'conversion-preview', text: sqlPreview(getSql()) });
+  head.appendChild(preview);
   const button = el('button', { className: 'btn btn-copy', text: t('ui.copy'), attrs: { type: 'button' } });
   button.disabled = enabled === false;
-  if (enabled !== false) button.addEventListener('click', () => copyToClipboard(sql, button));
+  button.addEventListener('click', (ev) => { ev.preventDefault(); ev.stopPropagation(); if (enabled !== false) copyToClipboard(getSql(), button); });
   head.appendChild(button); wrap.appendChild(head);
-  wrap.appendChild(el('pre', { text: sql }));
-  return wrap;
+  if (extraBody) wrap.appendChild(extraBody);
+  const pre = el('pre', { text: getSql() });
+  wrap.appendChild(pre);
+  return { wrap, pre, preview };
+}
+
+function sqlCopyBlock(label, sql, enabled) {
+  return foldedSqlBlock(label, () => sql, enabled).wrap;
 }
 
 function appendByKeyChooser(card, sql, dialect, inspection) {
@@ -768,23 +786,25 @@ function appendConvertedStages(card, converted, dialect) {
   card.appendChild(sqlCopyBlock(t('ui.stepCount'), converted.countSelect, true));
   card.appendChild(sqlCopyBlock(t('ui.stepDelete'), converted.delete, proven));
 
-  const updateStep = el('div', { className: 'conversion-step' });
-  const candidateHead = el('div', { className: 'conversion-head' });
-  candidateHead.appendChild(el('strong', { text: t('ui.stepUpdate') }));
   const choices = el('div', { className: 'column-candidates' });
-  const updatePre = el('pre', { text: converted.update });
-  const updateCopy = el('button', { className: 'btn btn-copy', text: t('ui.copy'), attrs: { type: 'button' } });
   const selectedColumns = () => [...choices.querySelectorAll('input:checked')].map((x) => x.value);
-  const refreshUpdate = () => { updatePre.textContent = DmlBuilder.applyColumns(converted.update, selectedColumns()); };
+  let currentUpdate = converted.update;
+  const folded = foldedSqlBlock(t('ui.stepUpdate'), () => currentUpdate, proven, choices);
+  const updatePre = folded.pre;
+  const refreshUpdate = () => {
+    currentUpdate = DmlBuilder.applyColumns(converted.update, selectedColumns());
+    updatePre.textContent = currentUpdate;
+    folded.preview.textContent = sqlPreview(currentUpdate);
+  };
   for (const column of converted.columnCandidates) {
     const label = el('label', { className: 'column-choice' });
     const input = el('input', { attrs: { type: 'checkbox', value: column } });
     input.addEventListener('change', refreshUpdate);
     label.append(input, document.createTextNode(column)); choices.appendChild(label);
   }
-  updateCopy.disabled = !proven;
-  updateCopy.addEventListener('click', () => copyToClipboard(updatePre.textContent, updateCopy));
-  candidateHead.appendChild(updateCopy); updateStep.appendChild(candidateHead); updateStep.appendChild(choices); updateStep.appendChild(updatePre); card.appendChild(updateStep);
+  // 列候補があるときは UPDATE だけ開いておく（列を選ぶ操作がここにあるため）
+  if (converted.columnCandidates.length) folded.wrap.open = true;
+  card.appendChild(folded.wrap);
 
   const syntaxOk = Object.values(converted.syntaxCheck || {}).every((x) => x && x.ok);
   const syntaxMessage = syntaxOk ? t('ui.syntaxCheckOk')
