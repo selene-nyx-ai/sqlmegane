@@ -1024,7 +1024,7 @@ body {
 .conversion-fold > pre, .conversion-fold > .column-candidates { margin: 0 16px 14px; }
 
 /* 折りたたみ見出しは「押せる行」と分かるように地色を変え、ホバーで明るくする（しぐれさん指摘 2026-09-17） */
-.conversion-fold > summary { background: var(--bg-elevated); border-left: 3px solid var(--accent); transition: background 0.12s ease; }
+.conversion-fold > summary { background: var(--bg-elevated); transition: background 0.12s ease; }
 .conversion-fold > summary:hover { background: var(--panel-border-soft); }
-.conversion-fold[open] > summary { background: var(--panel-border-soft); border-left-color: var(--accent-strong); }
+.conversion-fold[open] > summary { background: var(--panel-border-soft); }
 .conversion-fold > summary::before { color: var(--accent); }
