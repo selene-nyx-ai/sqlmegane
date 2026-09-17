@@ -87,11 +87,21 @@ WHERE product_id IN (
 
 次の点を生成結果にも黄色の注記で表示します。
 
+- キーには対象表の主キーか NOT NULL の一意キーを選んでください（複合キーは全列）。一意でない列だと、SELECT に出なかった同じキー値の行も更新・削除されます。ツールは一意性を確認できません。
 - キーが `NULL` の行は `IN` で一致せず、更新・削除されません。
 - サブクエリは DML 実行時に再評価されるため、先に確認した SELECT の結果から変わることがあります。
 - 自由入力した対象表が元 SELECT にない場合は、表とキーの対応を確認してください。
 
-MySQL / PostgreSQL / SQL Server では、同梱パーサで `FROM (WITH ... SELECT ...) sqlmegane_src` を含む生成文を再解析します。方言に合う単純な CTE では 3 方言ともこの派生表形を読み取れます。ただし、元 SELECT 自体に別方言の構文があれば構文確認は失敗します（上の PostgreSQL 例をそのまま MySQL / SQL Server として確認した場合の `INTERVAL '90 days'` など）。Oracle / 汎用は AST パーサがないため簡易構文確認です。Oracle は DML の先頭に `WITH` を置けないため、この派生表形を使います。接続先の製品・バージョンで派生表内の `WITH` が使えるかも実行前に確認してください。
+最終 SELECT の出力に同じ名前のキーが複数あるとき（自己結合や同名列の結合）は、どの表の列で絞るかが決まらないため変換せず、別名で 1 回だけ出力するよう求めます。
+
+方言別の違いは次のとおりです。
+
+- **MySQL**: 更新する表を副問合せで読む DML は `ERROR 1093` になります。派生表が実体化される場合は例外なので、`SELECT /*+ NO_MERGE(sqlmegane_src) */ ...` のヒントを付けて実体化を指示します。対象の MySQL（8.0 系）で通ることは実行前に確認してください。
+- **SQL Server**: 派生表の中に `WITH` を書けないため、`WITH` 句を文頭へ移し、最終 SELECT だけを派生表に入れます（`WITH ... DELETE FROM t WHERE k IN (SELECT k FROM (最終 SELECT) sqlmegane_src)`）。同梱パーサは `WITH ... DELETE` を読めないため、構文確認は WITH 付きの元 SELECT と DML 本体を分けて行います。
+- **PostgreSQL**: 派生表の中に `WITH` ごと入れます。
+- **Oracle / 汎用**: DML の先頭に `WITH` を置けないため派生表形を使います。AST パーサがないため簡易構文確認です。接続先の製品・バージョンで派生表内の `WITH` が使えるかも実行前に確認してください。
+
+MySQL / PostgreSQL / SQL Server では、同梱パーサで生成文を再解析します。元 SELECT 自体に別方言の構文があれば構文確認は失敗します（上の PostgreSQL 例をそのまま MySQL / SQL Server として確認した場合の `INTERVAL '90 days'` など）。
 
 注意: 生成した SQL は必ず読み返してから使ってください。候補行数 SELECT は結合後の候補件数の目安で、実際の影響行数ではありません。別名付きの SELECT から作った DELETE は、MySQL では 8.0.16 以降の構文（`DELETE FROM t AS a`）になります。それより前の MySQL では別名を外してください。CLI の `convert` は、生成物の自己検証で danger / warning が出た場合に標準エラーへ表示します（WHERE の無い SELECT から作った DML など）。
 
@@ -101,7 +111,7 @@ UPDATE、DELETE、INSERT SELECT、UPSERT / MERGE、CREATE TABLE の方言別型�
 
 ## 安全実行の枠
 
-変換した DML を、トランザクション開始、元 SELECT、候補行数、DML、影響行数確認、既定の ROLLBACK の順にまとめてコピーできます。確定版は確認ダイアログを経て COMMIT を含む形でコピーします。1 つの出力に実行可能な COMMIT と ROLLBACK は同時に入りません。Oracle では SQL\*Plus 対話用とバッチ用も選べます。同じトランザクション内でも同じ行集合は保証されないため、必要に応じて分離レベルやロックを設計してください。
+変換した DML を、トランザクション開始、元 SELECT、候補行数、DML、影響行数確認、更新後の内容確認（元 SELECT の再掲）、既定の ROLLBACK の順にまとめてコピーできます。末尾が ROLLBACK の版は、DML の直後で止めて確認するための並びで、そのまま一括で流すと取り消しで終わります（予行演習）。確定するときは、確認のあと COMMIT を自分で実行するか、確認ダイアログを経てコピーできる末尾 COMMIT の版を使います。1 つの出力に実行可能な COMMIT と ROLLBACK は同時に入りません。MySQL の `ROW_COUNT()` は UPDATE では値が変わった行数なので、一致行数は Rows matched で確認してください。Oracle では SQL\*Plus 対話用とバッチ用も選べます。同じトランザクション内でも同じ行集合は保証されないため、必要に応じて分離レベルやロックを設計してください。
 
 CLI からも利用できます。
 

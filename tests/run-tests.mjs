@@ -2690,7 +2690,10 @@ test('by-key: 末尾 ORDER BY と先頭コメントを inner から除く', () =
 for (const dialect of ['mysql', 'postgres', 'mssql', 'oracle', 'generic']) {
   test(`by-key: ${dialect} で派生表形と syntaxCheck を返す`, () => {
     const r = DmlBuilder.convertByKey(byKeyWithId, { dialect, targetTable: 'products', outputKey: 'product_id' });
-    assert.equal(r.status, 'ok'); assert.match(r.update, /FROM \(WITH monthly_sales/);
+    assert.equal(r.status, 'ok');
+    // SQL Server は派生表の中に WITH を書けないため、WITH 句を文頭へ移す。他方言は派生表の中に WITH ごと入れる
+    if (dialect === 'mssql') { assert.ok(r.update.includes('\nWITH monthly_sales'), r.update); assert.ok(!r.update.includes('FROM (WITH'), r.update); }
+    else assert.match(r.update, /FROM \(WITH monthly_sales/);
     assert.equal(typeof r.syntaxCheck.update.ok, 'boolean');
     assert.equal(r.syntaxCheck.update.mode, ['mysql', 'postgres', 'mssql'].includes(dialect) ? 'ast' : 'basic');
   });
@@ -2716,11 +2719,13 @@ test('by-key: query 外の対象表でも生成し warning を返す', () => {
 });
 test('by-key: NULL と再評価の warning を必ず返す', () => {
   const r = DmlBuilder.convertByKey('SELECT id FROM products', { dialect: 'mysql', targetTable: 'products', outputKey: 'id' });
-  assert.deepEqual(r.warnings, ['null-key-ignored', 'subquery-recomputed']);
+  assert.deepEqual(r.warnings, ['key-uniqueness', 'null-key-ignored', 'subquery-recomputed', 'mysql-no-merge']);
+  const pg = DmlBuilder.convertByKey('SELECT id FROM products', { dialect: 'postgres', targetTable: 'products', outputKey: 'id' });
+  assert.deepEqual(pg.warnings, ['key-uniqueness', 'null-key-ignored', 'subquery-recomputed']);
 });
 test('by-key: MySQL の更新対象自己参照も二重派生表になる', () => {
   const r = DmlBuilder.convertByKey('SELECT id FROM t WHERE active = 0', { dialect: 'mysql', targetTable: 't', outputKey: 'id' });
-  assert.match(r.delete, /DELETE FROM t WHERE id IN \(SELECT id FROM \(SELECT id FROM t WHERE active = 0\) sqlmegane_src\)/);
+  assert.ok(r.delete.includes('DELETE FROM t WHERE id IN (SELECT /*+ NO_MERGE(sqlmegane_src) */ id FROM (SELECT id FROM t WHERE active = 0) sqlmegane_src)'), r.delete);
 });
 test('by-key: 引用識別子は大小文字を区別する', () => {
   const bad = DmlBuilder.convertByKey('SELECT id AS "Product_ID" FROM t', { dialect: 'postgres', targetTable: 't', outputKey: '"product_id"' });
@@ -2783,6 +2788,62 @@ test('by-key: 行数制限のある SELECT では ORDER BY を落とさず派生
   assert.ok(plain.delete.includes('removed the final ORDER BY'), plain.delete);
   const top = B.convertByKey('SELECT TOP 5 id FROM scores ORDER BY score DESC', { dialect: 'mssql', targetTable: 'scores', outputKey: 'id' });
   assert.ok(top.delete.includes('TOP 5 id FROM scores ORDER BY score DESC) sqlmegane_src'), top.delete);
+});
+
+test('by-key: 同名のキー出力が複数あれば ambiguous-key', () => {
+  const r = DmlBuilder.convertByKey('SELECT a.id, b.id FROM t a JOIN t b ON a.parent_id = b.id', { dialect: 'postgres', targetTable: 't', outputKey: 'id' });
+  assert.equal(r.status, 'unsupported'); assert.equal(r.reasonCode, 'ambiguous-key');
+});
+test('by-key: key-uniqueness warning を必ず返す', () => {
+  const r = DmlBuilder.convertByKey('SELECT id FROM products', { dialect: 'postgres', targetTable: 'products', outputKey: 'id' });
+  assert.ok(r.warnings.includes('key-uniqueness'));
+});
+test('by-key: SQL Server では WITH 句を文頭へ移し、派生表には最終 SELECT だけを入れる', () => {
+  const sql = 'WITH recent AS (SELECT id FROM orders WHERE created_at > DATEADD(day, -7, GETDATE()))\nSELECT o.id, o.total FROM orders o JOIN recent r ON r.id = o.id WHERE o.total > 100';
+  const r = DmlBuilder.convertByKey(sql, { dialect: 'mssql', targetTable: 'orders', outputKey: 'id' });
+  assert.equal(r.status, 'ok', JSON.stringify(r.reasonCodes));
+  assert.ok(r.delete.startsWith('WITH recent AS ('), r.delete);
+  assert.ok(r.delete.includes('DELETE FROM orders WHERE id IN (SELECT id FROM (SELECT o.id, o.total FROM orders o JOIN recent r ON r.id = o.id WHERE o.total > 100) sqlmegane_src);'), r.delete);
+  assert.ok(!r.delete.includes('(WITH'), r.delete);
+  assert.ok(r.warnings.includes('mssql-cte-hoisted'));
+  assert.equal(r.equivalence, 'proven', JSON.stringify(r.invariants));
+  assert.equal(r.syntaxCheck.delete.ok, true, JSON.stringify(r.syntaxCheck.delete));
+  const pg = DmlBuilder.convertByKey(sql.replace('DATEADD(day, -7, GETDATE())', "NOW() - INTERVAL '7 days'"), { dialect: 'postgres', targetTable: 'orders', outputKey: 'id' });
+  assert.ok(pg.delete.includes('FROM (WITH recent AS ('), pg.delete);
+  assert.ok(!pg.warnings.includes('mssql-cte-hoisted'));
+});
+test('by-key: MySQL では NO_MERGE ヒントを付け、warning を返す', () => {
+  const r = DmlBuilder.convertByKey('SELECT id FROM t WHERE active = 0', { dialect: 'mysql', targetTable: 't', outputKey: 'id' });
+  assert.ok(r.delete.includes('DELETE FROM t WHERE id IN (SELECT /*+ NO_MERGE(sqlmegane_src) */ id FROM (SELECT id FROM t WHERE active = 0) sqlmegane_src);'), r.delete);
+  assert.ok(r.warnings.includes('mysql-no-merge'));
+  assert.equal(r.equivalence, 'proven', JSON.stringify(r.invariants));
+  assert.equal(r.syntaxCheck.delete.ok, true, JSON.stringify(r.syntaxCheck.delete));
+  const pg = DmlBuilder.convertByKey('SELECT id FROM t WHERE active = 0', { dialect: 'postgres', targetTable: 't', outputKey: 'id' });
+  assert.ok(!pg.delete.includes('NO_MERGE'), pg.delete);
+});
+test('手順つきブロック: DML の後に元 SELECT を再掲し、終端の説明に一括実行時の挙動を書く', () => {
+  const base = { dialect: 'oracle', client: 'sqlplus-interactive', originalSelect: 'SELECT id FROM t WHERE x = 1;', countSelect: 'SELECT COUNT(*) FROM t WHERE x = 1;', dml: 'DELETE FROM t WHERE x = 1;', locale: 'ja' };
+  const out = Templates.buildSafeBlock(base);
+  const first = out.indexOf('SELECT id FROM t WHERE x = 1;'); const dmlAt = out.indexOf('DELETE FROM t WHERE x = 1;'); const second = out.indexOf('SELECT id FROM t WHERE x = 1;', dmlAt);
+  assert.ok(first >= 0 && dmlAt > first && second > dmlAt, out);
+  assert.ok(out.includes('予行演習'), out);
+  assert.ok(Templates.buildSafeBlock({ ...base, commit: true }).includes('ROLLBACK を実行'), 'commit 版');
+  const my = Templates.buildSafeBlock({ ...base, dialect: 'mysql', client: 'generic' });
+  assert.ok(my.includes('Rows matched') && my.includes('InnoDB'), my);
+});
+test('検算SELECT（簡易チェック）: 結合を含む DML では結合表も FROM に入れる', () => {
+  const upd = analyzeSQL("UPDATE employees e SET status = 'LEFT' FROM departments d WHERE e.dept_id = d.dept_id AND d.closed = 1;", 'oracle').statements[0];
+  assert.ok(upd.verifySelect.includes('SELECT COUNT(*) FROM employees e, departments d WHERE e.dept_id = d.dept_id AND d.closed = 1;'), upd.verifySelect);
+  assert.equal(upd.verifySelectHasJoin, true);
+  const del = analyzeSQL('DELETE FROM employees e USING departments d WHERE e.dept_id = d.dept_id;', 'generic').statements[0];
+  assert.ok(del.verifySelect.includes('FROM employees e, departments d WHERE'), del.verifySelect);
+  const mj = analyzeSQL("UPDATE employees e JOIN departments d ON d.dept_id = e.dept_id SET e.status = 'LEFT' WHERE d.closed = 1;", 'oracle').statements[0];
+  assert.ok(mj.verifySelect.includes('SELECT COUNT(*) FROM employees e JOIN departments d ON d.dept_id = e.dept_id WHERE d.closed = 1;'), mj.verifySelect);
+  const dj = analyzeSQL('DELETE e FROM employees e JOIN departments d ON d.dept_id = e.dept_id WHERE d.closed = 1;', 'generic').statements[0];
+  assert.ok(dj.verifySelect.includes('SELECT COUNT(*) FROM employees e JOIN departments d ON d.dept_id = e.dept_id WHERE d.closed = 1;'), dj.verifySelect);
+  const plain = analyzeSQL('DELETE FROM orders o WHERE o.id IN (1, 2);', 'oracle').statements[0];
+  assert.equal(plain.verifySelect, 'SELECT COUNT(*) FROM orders o WHERE o.id IN (1, 2);');
+  assert.equal(plain.verifySelectHasJoin, false);
 });
 
 // ---------------------------------------------------------------------------

@@ -916,14 +916,72 @@ function findUncorrelatedSelfSubquery(masked, outerTableRaw) {
 // 検算 SELECT の生成
 // ---------------------------------------------------------------------------
 
-function buildVerifySelect(kind, masked, whereInfo) {
+/**
+ * 正規表現フォールバック用: 結合を含む DML（`UPDATE t SET ... FROM t2`、
+ * `DELETE FROM t USING t2`、`UPDATE t1 JOIN t2 ON ... SET`、`DELETE o FROM orders o JOIN ...`）
+ * から、検算SELECTの FROM に足すべきテーブル式を元のテキストから切り出す。
+ * 対象表だけの `SELECT COUNT(*) FROM t WHERE t.k = t2.k` は t2 が未定義で実行できないため。
+ * mode: 'append' = 対象表の後ろにカンマで続ける / 'replace' = テーブル式全体を置き換える。
+ */
+function joinedTableExprForFallback(kind, masked, plain) {
+  const bodyStart = findCteBodyStart(masked);
+  const lead = masked.slice(bodyStart);
+  const leadOffset = bodyStart + (lead.length - lead.replace(/^\s+/, '').length);
+  const s = masked.slice(leadOffset);
+  const src = plain && plain.length === masked.length ? plain : masked;
+  const endWords = ['WHERE'].concat(WHERE_END_WORDS);
+  const sliceTo = (start) => {
+    const e = topLevelSearchValidated(s, endWords, start, isValidWhereEndMatch);
+    const end = e ? e.index : s.length;
+    if (end <= start) return null;
+    const text = src.slice(leadOffset + start, leadOffset + end).trim().replace(/\s+/g, ' ');
+    return text.length > 0 ? text : null;
+  };
+  if (kind === 'UPDATE') {
+    const set = topLevelSearch(s, ['SET'], 0);
+    if (!set) return null;
+    const from = topLevelSearch(s, ['FROM'], set.index + set.length);
+    if (from) {
+      const text = sliceTo(from.index + from.length);
+      return text ? { mode: 'append', text } : null;
+    }
+    const m = s.match(/^UPDATE\s+/i);
+    if (m && /\bJOIN\b/i.test(s.slice(m[0].length, set.index))) {
+      const text = src.slice(leadOffset + m[0].length, leadOffset + set.index).trim().replace(/\s+/g, ' ');
+      return text ? { mode: 'replace', text } : null;
+    }
+    return null;
+  }
+  if (kind === 'DELETE') {
+    const from = topLevelSearch(s, ['FROM'], 0);
+    if (!from) return null;
+    const using = topLevelSearch(s, ['USING'], from.index + from.length);
+    if (using) {
+      const text = sliceTo(using.index + using.length);
+      return text ? { mode: 'append', text } : null;
+    }
+    const text = sliceTo(from.index + from.length);
+    if (text && /\bJOIN\b/i.test(text)) return { mode: 'replace', text };
+    return null;
+  }
+  return null;
+}
+
+function buildVerifySelect(kind, masked, whereInfo, plain) {
   const info = extractOuterTableWithAlias(kind, masked);
-  if (!info) return null;
-  // エイリアスがある場合は検算SELECTにも含める。そうしないと
-  // `DELETE FROM orders o WHERE o.id = 7;` のような文から
-  // `SELECT COUNT(*) FROM orders WHERE o.id = 7;` という、
-  // エイリアス未定義で実行できないSELECTが生成されてしまう。
-  const tableExpr = info.alias ? `${info.table} ${info.alias}` : info.table;
+  const joined = joinedTableExprForFallback(kind, masked, plain);
+  let tableExpr = null;
+  if (joined && joined.mode === 'replace') {
+    tableExpr = joined.text;
+  } else if (info) {
+    // エイリアスがある場合は検算SELECTにも含める。そうしないと
+    // `DELETE FROM orders o WHERE o.id = 7;` のような文から
+    // `SELECT COUNT(*) FROM orders WHERE o.id = 7;` という、
+    // エイリアス未定義で実行できないSELECTが生成されてしまう。
+    tableExpr = info.alias ? `${info.table} ${info.alias}` : info.table;
+    if (joined) tableExpr += `, ${joined.text}`;
+  }
+  if (!tableExpr) return null;
   if (whereInfo) {
     const cond = whereInfo.plainClause.trim().replace(/\s+/g, ' ');
     if (cond.length > 0) {
@@ -987,7 +1045,12 @@ const VERIFY_SELECT_JOIN_NOTE = '※JOINを含むため結合行数です。1対
  *  正規表現フォールバック版の buildVerifySelect は単一テーブル名しか含めないため
  *  JOINキーワードは現れない）。 */
 function verifySelectHasJoin(sql) {
-  return !!sql && /\bJOIN\b/i.test(sql);
+  if (!sql) return false;
+  if (/\bJOIN\b/i.test(sql)) return true;
+  // カンマ結合（`FROM t1 a, t2 b WHERE ...`）も結合行数になる。括弧の中（副問合せ・IN リスト）は除いて判定
+  let fromPart = sql.split(/\bWHERE\b/i)[0];
+  for (let i = 0; i < 5 && /\(/.test(fromPart); i++) fromPart = fromPart.replace(/\([^()]*\)/g, '');
+  return /\bFROM\b[^,]*,/i.test(fromPart);
 }
 
 /**
@@ -1352,7 +1415,7 @@ function analyzeStatement(rawStmt, dialect, opts) {
     let verifySelectRaw = null;
     if (kind === 'UPDATE' || kind === 'DELETE') {
       verifySelectRaw = buildVerifySelectFromAst(kind, ast, masked, plain, whereInfo)
-        || buildVerifySelect(kind, masked, whereInfo);
+        || buildVerifySelect(kind, masked, whereInfo, plain);
     }
     const finalizedVerify = finalizeVerifySelect(verifySelectRaw);
     findings.sort((a, b) => SEVERITY_ORDER[a.severity] - SEVERITY_ORDER[b.severity]);
@@ -1575,7 +1638,7 @@ function analyzeStatementByRegex(rawStmt, dialect, ctx) {
 
   let verifySelectRaw = null;
   if (kind === 'UPDATE' || kind === 'DELETE') {
-    verifySelectRaw = buildVerifySelect(kind, masked, whereInfo);
+    verifySelectRaw = buildVerifySelect(kind, masked, whereInfo, plain);
   }
   const finalizedVerify = finalizeVerifySelect(verifySelectRaw);
 

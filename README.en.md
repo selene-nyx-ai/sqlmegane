@@ -59,11 +59,21 @@ Its equivalence is defined as: rows in the target table whose key value appears 
 
 The generated result shows these warnings:
 
+- Choose the primary key or a NOT NULL unique key of the target table (all columns of a composite key). With a non-unique column, rows that share a key value but did not appear in the SELECT are also updated or deleted. The tool cannot verify uniqueness.
 - A `NULL` key does not match `IN`, so that row is not updated or deleted.
 - The subquery is evaluated again when the DML runs and may differ from the SELECT result checked earlier.
 - When the entered target is absent from the source query, check the table and key mapping.
 
-For MySQL, PostgreSQL, and SQL Server, the bundled parser checks the generated statement containing `FROM (WITH ... SELECT ...) sqlmegane_src`. All three parsers accept this derived-table form when the CTE uses syntax for that dialect. The check still fails when the original SELECT contains syntax from another dialect, such as PostgreSQL's `INTERVAL '90 days'` in a query checked as MySQL or SQL Server. Oracle and Generic have basic syntax checks only. Oracle cannot put `WITH` before DML, so this feature uses the derived-table form. Verify support for `WITH` inside a derived table on the database product and version you run.
+When the final SELECT outputs the same key name more than once (self-joins, joins on same-named columns), the converter refuses because it cannot tell which table's column to filter on. Output the key once, with an alias if needed.
+
+Dialect differences:
+
+- **MySQL**: DML that reads the modified table in a subquery raises `ERROR 1093`. A materialized derived table is the documented exception, so the generated SQL adds `SELECT /*+ NO_MERGE(sqlmegane_src) */ ...`. Confirm it runs on your MySQL 8.0 version before use.
+- **SQL Server**: `WITH` is not allowed inside a derived table, so the `WITH` clause is moved to the start of the statement and only the final SELECT goes into the derived table (`WITH ... DELETE FROM t WHERE k IN (SELECT k FROM (final SELECT) sqlmegane_src)`). The bundled parser cannot read `WITH ... DELETE`, so the syntax check parses the original WITH SELECT and the DML body separately.
+- **PostgreSQL**: the whole `WITH ... SELECT` goes inside the derived table.
+- **Oracle / Generic**: `WITH` cannot precede DML, so the derived-table form is used. These dialects have basic syntax checks only. Verify support for `WITH` inside a derived table on the database product and version you run.
+
+For MySQL, PostgreSQL, and SQL Server, the bundled parser re-parses the generated statement. The check still fails when the original SELECT contains syntax from another dialect, such as PostgreSQL's `INTERVAL '90 days'` in a query checked as MySQL or SQL Server.
 
 Always read the generated SQL before using it. The candidate count SELECT is an estimate of matching rows, not the affected-row count. A DELETE built from an aliased SELECT uses MySQL 8.0.16+ syntax (`DELETE FROM t AS a`); drop the alias on older MySQL. The CLI `convert` command prints danger and warning findings from the self-check to stderr (for example, DML built from a SELECT without WHERE).
 

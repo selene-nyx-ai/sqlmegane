@@ -349,28 +349,31 @@ function innerSelect(sql) {
   let statement = stripLeadingComments(sql).replace(/;\s*$/, '').trimEnd();
   const tokens = lex(statement);
   const info = finalSelectInfo(tokens);
-  if (!info) return { text: statement, orderByRemoved: false };
+  if (!info) return { text: statement, orderByRemoved: false, finalSelectStart: 0 };
+  // 最終 SELECT の開始位置。SQL Server は派生表の中に WITH を書けないので、WITH 句をこの位置で切って文頭へ移す
+  const finalSelectStart = tokens[info.selectIndex].start;
   const orderIndex = tokens.findIndex((t, i) => i > info.fromIndex && t.depth === 0 && t.upper === 'ORDER'
     && tokens[i + 1] && tokens[i + 1].depth === 0 && tokens[i + 1].upper === 'BY');
-  if (orderIndex < 0) return { text: statement, orderByRemoved: false };
+  if (orderIndex < 0) return { text: statement, orderByRemoved: false, finalSelectStart };
   // 行数制限（LIMIT / OFFSET / FETCH / TOP）がある SELECT では ORDER BY が行集合そのものを決める。
   // その場合は ORDER BY を落とすと「上位 N 件」の意味が消えて対象が広がるので、何も削らずそのまま派生表にする。
   const top = tokens.filter((t) => t.depth === 0);
   const selectAt = top.findIndex((t) => t.start === tokens[info.selectIndex >= 0 ? info.selectIndex : 0].start);
   const hasRowLimit = top.some((t, i) => (['LIMIT', 'OFFSET', 'FETCH'].includes(t.upper) && t.start > tokens[info.fromIndex].start)
     || (t.upper === 'TOP' && selectAt >= 0 && i === selectAt + 1));
-  if (hasRowLimit) return { text: statement, orderByRemoved: false, rowLimitKept: true };
-  return { text: statement.slice(0, tokens[orderIndex].start).trimEnd(), orderByRemoved: true };
+  if (hasRowLimit) return { text: statement, orderByRemoved: false, rowLimitKept: true, finalSelectStart };
+  return { text: statement.slice(0, tokens[orderIndex].start).trimEnd(), orderByRemoved: true, finalSelectStart };
 }
 
-function byKeyInvariants(generated, inner, targetTable, outputKey) {
+// generated は WITH 句の文頭移動（SQL Server）や注記コメントを付ける前の本体で検証する
+function byKeyInvariants(generated, inner, targetTable, keyHead) {
   const values = Object.values(generated);
   const targetNorm = normalizeIdentifier(String(targetTable).split('.').pop());
   const outside = (sql) => sql.slice(0, sql.indexOf(' IN (SELECT '));
   return {
     innerOnce: values.every((sql) => countLiteral(sql, inner) === 1),
     targetOnce: values.every((sql) => lex(outside(sql)).filter((t) => isIdentifier(t) && normalizeIdentifier(t.text) === targetNorm).length === 1),
-    keyInOutput: values.every((sql) => sql.includes(`SELECT ${outputKey} FROM (`)),
+    keyInOutput: values.every((sql) => sql.includes(keyHead)),
   };
 }
 
@@ -385,28 +388,64 @@ function convertByKey(sqlText, options) {
   const targetKey = String(opts.targetKey || outputKey).trim();
   const named = checked.outputColumns.filter((c) => c.name && c.kind !== 'star');
   if (!named.length && checked.outputColumns.some((c) => c.kind === 'star')) return unsupported('star-output', original);
-  if (!named.some((c) => identifierEquals(c.name, outputKey))) {
+  const keyMatches = named.filter((c) => identifierEquals(c.name, outputKey));
+  if (!keyMatches.length) {
     const result = unsupported('key-not-in-output', original, { key: outputKey, available: named.map((c) => c.name).join(', ') });
+    result.inspection = checked; return result;
+  }
+  // 同名の出力が複数あると、どの表の列で絞るかが決まらない（自己結合・同名キーの結合）。別名で 1 回にしてもらう
+  if (keyMatches.length > 1) {
+    const result = unsupported('ambiguous-key', original, { key: outputKey });
     result.inspection = checked; return result;
   }
   const inner = innerSelect(original);
   const note = inner.orderByRemoved ? '-- SQLMegane: removed the final ORDER BY inside the derived table.\n' : '';
-  const predicate = `${targetKey} IN (SELECT ${outputKey} FROM (${inner.text}) sqlmegane_src)`;
-  const update = `${note}UPDATE ${targetTable} SET <column> = <value> WHERE ${predicate};`;
-  const del = `${note}DELETE FROM ${targetTable} WHERE ${predicate};`;
-  const countSelect = `${note}SELECT COUNT(*) FROM ${targetTable} WHERE ${predicate};`;
-  const warnings = ['null-key-ignored', 'subquery-recomputed'];
+  // 一意性は確認できないので必ず注意を出す。NULL キーと再評価も同様
+  const warnings = ['key-uniqueness', 'null-key-ignored', 'subquery-recomputed'];
+  // SQL Server は派生表の中に WITH を書けない → WITH 句を文頭へ移し、最終 SELECT だけを派生表にする
+  let prefix = '';
+  let body = inner.text;
+  if (dialect === 'mssql' && checked.ctes.length > 0 && inner.finalSelectStart > 0) {
+    prefix = inner.text.slice(0, inner.finalSelectStart).trimEnd() + '\n';
+    body = inner.text.slice(inner.finalSelectStart);
+    warnings.push('mssql-cte-hoisted');
+  }
+  // MySQL は更新する表を副問合せで読む DML を禁止（ERROR 1093）。派生表が実体化される場合だけ例外なので NO_MERGE で実体化を指示する
+  const hint = dialect === 'mysql' ? '/*+ NO_MERGE(sqlmegane_src) */ ' : '';
+  if (hint) warnings.push('mysql-no-merge');
+  const keyHead = `SELECT ${hint}${outputKey} FROM (`;
+  const predicate = `${targetKey} IN (${keyHead}${body}) sqlmegane_src)`;
+  const bodies = {
+    update: `UPDATE ${targetTable} SET <column> = <value> WHERE ${predicate};`,
+    delete: `DELETE FROM ${targetTable} WHERE ${predicate};`,
+    countSelect: `SELECT COUNT(*) FROM ${targetTable} WHERE ${predicate};`,
+  };
+  const invariants = byKeyInvariants(bodies, body, targetTable, keyHead);
+  const update = `${note}${prefix}${bodies.update}`;
+  const del = `${note}${prefix}${bodies.delete}`;
+  const countSelect = `${note}${prefix}${bodies.countSelect}`;
   if (!checked.tables.some((t) => identifierEquals(t.name, targetTable))) warnings.push('target-not-in-query');
-  const generated = { update, delete: del, countSelect };
-  const invariants = byKeyInvariants(generated, inner.text, targetTable, outputKey);
   return {
     status: 'ok', reasonCode: null, reasonCodes: [], reasonParams: {}, mode: 'by-key',
     target: { table: targetTable, alias: null, asWritten: targetTable, outputKey, targetKey },
     original: original.trim().replace(/;\s*$/, '') + ';', delete: del, update, countSelect,
     columnCandidates: [], equivalence: Object.values(invariants).every(Boolean) ? 'proven' : 'unsupported',
     invariants, warnings, inspection: checked,
-    syntaxCheck: { delete: syntaxCheck(del, dialect), update: syntaxCheck(update, dialect), countSelect: syntaxCheck(countSelect, dialect) },
+    syntaxCheck: { delete: check(del, bodies.delete), update: check(update, bodies.update), countSelect: check(countSelect, bodies.countSelect) },
   };
+
+  // WITH 句を文頭へ移した形（SQL Server）は、同梱パーサが `WITH ... DELETE` を読めないため、
+  // 「WITH 付きの元 SELECT」と「DML 本体（CTE 名を表として参照）」を別々に確認して合成する
+  function check(full, bodySql) {
+    if (!prefix) return syntaxCheck(full, dialect);
+    const a = syntaxCheck(bodySql, dialect);
+    const b = syntaxCheck(inner.text, dialect);
+    return {
+      ok: !!(a.ok && b.ok), mode: a.mode, partial: true,
+      error: a.ok ? (b.ok ? null : b.error) : a.error,
+      usedFallbackDialect: a.usedFallbackDialect || b.usedFallbackDialect || null,
+    };
+  }
 }
 
 function columnCandidates(sql, tokens, selectIndex, fromIndex, target) {

@@ -5,26 +5,30 @@
 const comments = {
   ja: {
     genericCheck: '製品のトランザクション構文を確認してください。',
-    mysqlStart: '進行中のトランザクションがあると暗黙コミットされます。無いことを確認してから実行してください。',
+    mysqlStart: '進行中のトランザクションがあると暗黙コミットされます。無いことと、対象表が InnoDB などトランザクション対応エンジンであることを確認してから実行してください。',
     oracleStart: 'Oracle は最初の DML で自動的に開始します。BEGIN は書きません。',
     inspect: '対象行を目で確認', count: '候補行数（実更新行数ではない。同時更新で変わる）',
     isolation: '同じトランザクション内でも同じ行集合は保証されません（分離レベル・ロックが必要）。',
     pgRows: 'クライアントのコマンドタグ（UPDATE n / DELETE n）を確認してください。',
     oraRows: 'SQL*Plus のフィードバック（n rows updated / deleted）を確認してください。',
-    rollback: '内容を確認し、確定する場合だけ COMMIT を別途実行してください。',
-    commit: '影響行数と内容を確認した上で確定します。',
+    mysqlRows: 'ROW_COUNT() は UPDATE では値が変わった行数です（同じ値を再設定した行は数えません）。一致行数は Rows matched で確認してください。',
+    after: '更新後の内容を確認（DELETE なら 0 行。UPDATE で WHERE に更新した列が含まれる場合も 0 行になる）',
+    rollback: 'ここで止めて、影響行数と内容を確認してください。この下まで一括で流すと取り消しになります（予行演習）。確定する場合は、確認のあと COMMIT を自分で実行してください。',
+    commit: 'ここで止めて、影響行数と内容を確認してください。この下まで一括で流すと確定します。想定外なら COMMIT の代わりに ROLLBACK を実行してください。',
     genericMerge: '製品がこの MERGE 構文に対応するか確認してください。',
   },
   en: {
     genericCheck: 'Check the transaction syntax for your database product.',
-    mysqlStart: 'An existing transaction may be committed implicitly. Run this only after confirming none is active.',
+    mysqlStart: 'An existing transaction may be committed implicitly. Run this only after confirming none is active and that the target table uses a transactional engine such as InnoDB.',
     oracleStart: 'Oracle starts a transaction with the first DML statement; do not write BEGIN.',
     inspect: 'Inspect the target rows', count: 'Candidate row count (not the actual affected row count; concurrent changes may alter it)',
     isolation: 'The same row set is not guaranteed within one transaction; an appropriate isolation level or locking is required.',
     pgRows: 'Check the client command tag (UPDATE n / DELETE n).',
     oraRows: 'Check SQL*Plus feedback (n rows updated / deleted).',
-    rollback: 'Review the result and run COMMIT separately only when you intend to make it permanent.',
-    commit: 'Commit only after reviewing the affected row count and contents.',
+    mysqlRows: 'For UPDATE, ROW_COUNT() counts rows whose values changed (rows set to the same value are not counted). Check Rows matched for the matched count.',
+    after: 'Inspect the rows after the change (0 rows for DELETE; also 0 rows for UPDATE when the WHERE clause uses an updated column)',
+    rollback: 'Stop here and review the affected row count and contents. Running past this point rolls the change back (dry run). To make it permanent, run COMMIT yourself after reviewing.',
+    commit: 'Stop here and review the affected row count and contents. Running past this point makes the change permanent. If anything is unexpected, run ROLLBACK instead of COMMIT.',
     genericMerge: 'Confirm that your database product supports this MERGE syntax.',
   },
 };
@@ -68,10 +72,12 @@ function buildSafeBlock(options) {
   else if (d === 'oracle') lines.push(c(m.oracleStart));
   else lines.push(c(m.genericCheck), 'START TRANSACTION;');
   lines.push('', c(m.isolation), '', c(m.inspect), String(o.originalSelect || '').trim(), '', c(m.count), String(o.countSelect || '').trim(), '', String(o.dml || '').trim(), '');
-  if (d === 'mysql') lines.push('SELECT ROW_COUNT();');
+  if (d === 'mysql') lines.push('SELECT ROW_COUNT();', c(m.mysqlRows));
   else if (d === 'mssql') lines.push('SELECT @@ROWCOUNT AS affected_rows;');
   else if (d === 'postgres') lines.push(c(m.pgRows));
   else if (d === 'oracle') lines.push(c(m.oraRows));
+  // 件数だけでは SET 値の誤りや連鎖変更に気づけないので、元 SELECT をもう一度流して内容を見る
+  lines.push('', c(m.after), String(o.originalSelect || '').trim());
   if (commit) lines.push('', c(m.commit), 'COMMIT;', '-- ROLLBACK;');
   else lines.push('', c(m.rollback), 'ROLLBACK;', '-- COMMIT;');
   if (d === 'oracle' && client === 'sqlplus-batch') lines.push('', commit ? 'EXIT' : 'EXIT ROLLBACK');
