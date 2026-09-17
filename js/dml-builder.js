@@ -387,6 +387,17 @@ function convertByKey(sqlText, options) {
   const targetTable = String(opts.targetTable || '').trim();
   const outputKey = String(opts.outputKey || '').trim();
   const targetKey = String(opts.targetKey || outputKey).trim();
+  // 行数制限とロック句の判定は出力列の判定より先に行う。SELECT * のまま試した利用者に「列を明示すれば通る」と
+  // 誤解させないため（ブラインドテスト 2026-09-17 の指摘）
+  const inner = innerSelect(original);
+  // 上位 N 件（LIMIT / OFFSET / FETCH / TOP）は、ORDER BY が一意でないと DML 実行時の再評価で別の行を選ぶ。
+  // ツールは一意性を確認できないので変換しない。確認済みのキーを一時表に保存して固定する手順を案内する
+  if (inner.rowLimit) { const result = unsupported('row-limit', original); result.inspection = checked; return result; }
+  // ロック句（FOR UPDATE / FOR SHARE）は派生表や副問合せにそのまま移せない製品があり、外すとロックの意味が変わる
+  const innerTokens = lex(inner.text);
+  if (innerTokens.some((t, i) => t.upper === 'FOR' && innerTokens[i + 1] && ['UPDATE', 'SHARE'].includes(innerTokens[i + 1].upper))) {
+    const result = unsupported('lock-clause', original); result.inspection = checked; return result;
+  }
   const named = checked.outputColumns.filter((c) => c.name && c.kind !== 'star');
   if (!named.length && checked.outputColumns.some((c) => c.kind === 'star')) return unsupported('star-output', original);
   const keyMatches = named.filter((c) => identifierEquals(c.name, outputKey));
@@ -398,15 +409,6 @@ function convertByKey(sqlText, options) {
   if (keyMatches.length > 1) {
     const result = unsupported('ambiguous-key', original, { key: outputKey });
     result.inspection = checked; return result;
-  }
-  const inner = innerSelect(original);
-  // 上位 N 件（LIMIT / OFFSET / FETCH / TOP）は、ORDER BY が一意でないと DML 実行時の再評価で別の行を選ぶ。
-  // ツールは一意性を確認できないので変換しない。確認済みのキーを一時表に保存して固定する手順を案内する
-  if (inner.rowLimit) { const result = unsupported('row-limit', original); result.inspection = checked; return result; }
-  // ロック句（FOR UPDATE / FOR SHARE）は派生表や副問合せにそのまま移せない製品があり、外すとロックの意味が変わる
-  const innerTokens = lex(inner.text);
-  if (innerTokens.some((t, i) => t.upper === 'FOR' && innerTokens[i + 1] && ['UPDATE', 'SHARE'].includes(innerTokens[i + 1].upper))) {
-    const result = unsupported('lock-clause', original); result.inspection = checked; return result;
   }
   // 条件の部分（WITH 句＋最終 SELECT の FROM 以降）。更新する列が条件に含まれるかの判定に使う
   const where = inner.text.slice(0, inner.finalSelectStart) + inner.text.slice(inner.whereFrom);

@@ -2579,11 +2579,20 @@ test('CLI convert: JSON schema and columns', () => {
   assert.deepEqual(value.invariants, { whereOnce: true, targetOnce: true, noOtherTables: true });
   assert.ok(!value.selfCheck.some((f) => f.code === 'unfilled-placeholder'), 'convert の生成物ではプレースホルダ未記入を自己検証に含めない');
 });
-test('CLI convert: WHERE の無い SELECT から作った DML は stderr に danger を出す（stdout は SQL のみ）', () => {
+test('CLI convert: WHERE の無い SELECT から作った DML は stderr に danger を出し、終了コード 2（--fail-on never なら 0）', () => {
   const r = runCli(['convert', '--to', 'delete', '--dialect', 'mysql', '-'], 'SELECT id FROM t');
-  assert.equal(r.status, 0, r.stderr);
+  assert.equal(r.status, 2, r.stderr);
   assert.equal(r.stdout.trim(), 'DELETE FROM t;');
   assert.ok(r.stderr.includes('WHERE'), r.stderr);
+  const never = runCli(['convert', '--to', 'delete', '--dialect', 'mysql', '--fail-on', 'never', '-'], 'SELECT id FROM t');
+  assert.equal(never.status, 0, never.stderr);
+  const safe = runCli(['convert', '--to', 'delete', '--dialect', 'mysql', '-'], 'SELECT id FROM t WHERE id = 1');
+  assert.equal(safe.status, 0, safe.stderr);
+  // プレースホルダ未記入（<value>）は convert の前提なので終了コードに数えない
+  const upd = runCli(['convert', '--to', 'update', '--dialect', 'mysql', '--columns', 'name', '-'], 'SELECT id FROM t WHERE id = 1');
+  assert.equal(upd.status, 0, upd.stderr);
+  const bad = runCli(['convert', '--to', 'delete', '--dialect', 'db2', '-'], 'SELECT id FROM t WHERE id = 1');
+  assert.equal(bad.status, 1); assert.ok(bad.stderr.includes('--dialect は'), bad.stderr);
 });
 test('dml-builder: invariants は実際に数えて判定する（対象表と同名の別名では targetOnce が偽になる）', () => {
   const B = globalThis.SQLMeganeDmlBuilder;

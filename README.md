@@ -126,6 +126,8 @@ node cli/sqlmegane.mjs convert --to delete --dialect postgres --target products 
 node cli/sqlmegane.mjs template --kind upsert --dialect postgres --lang ja
 ```
 
+`convert` の終了コード: `0` = 生成した / `2` = 生成したが、生成物の自己検証に `--fail-on`（既定 `danger`）以上の指摘がある（WHERE の無い SELECT から作った全行 DELETE など。SQL は stdout に出し、指摘は stderr に出す。未記入のプレースホルダは数えない） / `3` = 変換できない（理由は stderr） / `4` = 方言を確定できない（`--dialect auto` のとき） / `1` = 使い方・入力の誤り（存在しない方言名など）。生成した SQL をパイプで後続コマンドへ渡す運用では、解析モードと同じく終了コードで止めてください。
+
 | 方言の選択 | 解析 | 日本語要約 | 使うパーサ |
 |---|---|---|---|
 | MySQL | 構文解析（AST） | あり | 同梱 node-sql-parser（mysql） |

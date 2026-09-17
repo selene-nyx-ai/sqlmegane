@@ -96,6 +96,8 @@ node cli/sqlmegane.mjs convert --to delete --dialect postgres --target products 
 node cli/sqlmegane.mjs template --kind upsert --dialect postgres --lang en
 ```
 
+Exit codes of `convert`: `0` = generated / `2` = generated, but the self-check of the output has a finding at or above `--fail-on` (default `danger`), such as a whole-table DELETE built from a SELECT without WHERE (the SQL still goes to stdout, findings to stderr; unfilled placeholders are not counted) / `3` = cannot convert (reason on stderr) / `4` = dialect could not be determined (`--dialect auto`) / `1` = usage or input error (for example an unknown dialect name). When piping the generated SQL into another command, gate on the exit code just as in analysis mode.
+
 | Dialect selected | Analysis | English summary | Parser |
 |---|---|---|---|
 | MySQL | Parsed SQL (AST) | yes | bundled node-sql-parser (mysql) |

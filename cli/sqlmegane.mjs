@@ -311,7 +311,7 @@ function installEpipeHandler() {
 function parseSubcommand(argv, command) {
   const out = {
     command, to: null, kind: null, dialect: command === 'convert' ? 'auto' : 'generic',
-    oracleVersion: 'legacy', columns: [], safeBlock: null, commit: false,
+    oracleVersion: 'legacy', columns: [], safeBlock: null, commit: false, failOn: 'danger',
     lang: 'ja', json: false, maxBytes: DEFAULT_MAX_BYTES, file: null,
     target: null, byKey: null, targetKey: null,
   };
@@ -337,6 +337,7 @@ function parseSubcommand(argv, command) {
       else if (name === '--by-key') out.byKey = take();
       else if (name === '--target-key') out.targetKey = take();
       else if (name === '--safe-block') out.safeBlock = take();
+      else if (name === '--fail-on') out.failOn = take();
       else if (name === '--lang') out.lang = take();
       else if (name === '--max-bytes') out.maxBytes = Number(take());
       else if (name === '--commit') out.commit = true;
@@ -347,13 +348,16 @@ function parseSubcommand(argv, command) {
     if (out.file !== null) throw new UsageError('Only one input file may be specified');
     out.file = a;
   }
-  if (!['generic', 'mysql', 'postgres', 'mssql', 'oracle', 'auto'].includes(out.dialect)) throw new UsageError(`Invalid dialect: ${out.dialect}`);
-  if (!['legacy', '23'].includes(out.oracleVersion)) throw new UsageError('--oracle-version must be legacy or 23');
-  if (!['ja', 'en'].includes(out.lang)) throw new UsageError('--lang must be ja or en');
-  if (!Number.isInteger(out.maxBytes) || out.maxBytes <= 0) throw new UsageError('--max-bytes must be a positive integer');
+  // 使い方の誤りは終了コード 1（変換不可 3 / 方言不明 4 とは別）。--lang が確定する前に出ることがあるので両言語で出す
+  const usage = (ja, en) => new UsageError(out.lang === 'en' ? en : `${ja}（${en}）`);
+  if (!['generic', 'mysql', 'postgres', 'mssql', 'oracle', 'auto'].includes(out.dialect)) throw usage(`--dialect は auto / generic / mysql / postgres / mssql / oracle のいずれかです: ${out.dialect}`, `Invalid dialect: ${out.dialect}`);
+  if (!['legacy', '23'].includes(out.oracleVersion)) throw usage('--oracle-version は legacy / 23 のいずれかです', '--oracle-version must be legacy or 23');
+  if (!['ja', 'en'].includes(out.lang)) throw new UsageError('--lang は ja / en のいずれかです（--lang must be ja or en）');
+  if (!Number.isInteger(out.maxBytes) || out.maxBytes <= 0) throw usage('--max-bytes は正の整数です', '--max-bytes must be a positive integer');
+  if (!FAIL_ON.includes(out.failOn)) throw usage(`--fail-on は ${FAIL_ON.join(' / ')} のいずれかです: ${out.failOn}`, `--fail-on must be one of ${FAIL_ON.join(', ')}: ${out.failOn}`);
   if (command === 'convert') {
-    if (!['update', 'delete'].includes(out.to)) throw new UsageError('--to must be update or delete');
-    if (out.safeBlock && !['generic', 'sqlplus-interactive', 'sqlplus-batch'].includes(out.safeBlock)) throw new UsageError('Invalid --safe-block client');
+    if (!['update', 'delete'].includes(out.to)) throw usage('--to は update / delete のいずれかです', '--to must be update or delete');
+    if (out.safeBlock && !['generic', 'sqlplus-interactive', 'sqlplus-batch'].includes(out.safeBlock)) throw usage('--safe-block は generic / sqlplus-interactive / sqlplus-batch のいずれかです', 'Invalid --safe-block client');
     if (!!out.target !== !!out.byKey) throw new UsageError('--target and --by-key must be specified together');
     if (out.targetKey && !out.byKey) throw new UsageError('--target-key requires --target and --by-key');
   } else if (command === 'template') {
@@ -427,7 +431,13 @@ async function runSubcommand(command, argv) {
       selfCheck: selfFindings.map((f) => ({ severity: f.severity, code: f.code, title: f.title })),
     }) + '\n');
   } else process.stdout.write(output.replace(/\s+$/, '') + '\n');
-  process.exitCode = 0;
+  // 生成できても自己検証で危険（WHERE の無い DML など）なら終了コード 2。解析モードの --fail-on と同じ規則で、
+  // パイプで後続コマンドへ直結する運用でも機械的に止められるようにする（ブラインドテスト 2026-09-17 の指摘）
+  const threshold = { danger: 0, warning: 1, info: 2 }[opts.failOn];
+  const gated = selfCheck.statements.flatMap((s) => s.findings)
+    .filter((f) => f.code !== 'unfilled-placeholder')
+    .some((f) => threshold !== undefined && { danger: 0, warning: 1, info: 2 }[f.severity] <= threshold);
+  process.exitCode = gated ? 2 : 0;
 }
 
 async function main() {
