@@ -1809,7 +1809,9 @@ function analyzeSQL(fullText, dialect, options) {
             'info',
             'no-transaction',
             'トランザクションに包まれていません',
-            'この破壊的操作の前にBEGIN（トランザクション開始）が見当たりません。明示的にトランザクションを開始しておくと、結果を確認してからCOMMIT、想定外であればROLLBACKする運用がしやすくなります。'
+            d === 'oracle'
+              ? 'Oracle では最初の DML でトランザクションが自動的に始まります（開始用の BEGIN は不要）。クライアントの自動コミット（SQL*Plus の SET AUTOCOMMIT ON など）が無効なことを確認し、結果を見てから COMMIT、想定外なら ROLLBACK してください。'
+              : 'この破壊的操作の前にBEGIN（トランザクション開始）が見当たりません。明示的にトランザクションを開始しておくと、結果を確認してからCOMMIT、想定外であればROLLBACKする運用がしやすくなります。'
           ));
         } else {
           // 複数文貼り付け時は文ごとに繰り返し出さず、バッチ全体で1回（globalFindings）
@@ -1880,7 +1882,9 @@ function analyzeSQL(fullText, dialect, options) {
       'info',
       'no-transaction',
       'トランザクションに包まれていない破壊的操作があります',
-      `明示的なBEGIN（トランザクション開始）に包まれていない破壊的操作（UPDATE/DELETE/TRUNCATE/DROPなど）が${noTransactionStatementNumbers.length}件あります（${nums}）。結果を確認してからCOMMIT、想定外であればROLLBACKできるよう、明示的にトランザクションを開始しておくことを検討してください。`
+      d === 'oracle'
+        ? `トランザクション開始が明示されていない破壊的操作（UPDATE/DELETE/TRUNCATE/DROPなど）が${noTransactionStatementNumbers.length}件あります（${nums}）。Oracle では最初の DML で自動的に始まるので、クライアントの自動コミット（SQL*Plus の SET AUTOCOMMIT ON など）が無効なことを確認し、結果を見てから COMMIT、想定外なら ROLLBACK してください。`
+        : `明示的なBEGIN（トランザクション開始）に包まれていない破壊的操作（UPDATE/DELETE/TRUNCATE/DROPなど）が${noTransactionStatementNumbers.length}件あります（${nums}）。結果を確認してからCOMMIT、想定外であればROLLBACKできるよう、明示的にトランザクションを開始しておくことを検討してください。`
     ));
   }
   if (destructiveCount >= 2) {

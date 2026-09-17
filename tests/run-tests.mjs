@@ -332,6 +332,20 @@ test('BEGINで囲まれていればno-transactionは付かない', () => {
   assert.ok(!hasCode(del.findings, 'no-transaction'));
 });
 
+test('Oracle 方言の no-transaction は BEGIN ではなく自動開始と自動コミットの確認を案内する', () => {
+  const single = analyzeSQL('DELETE FROM orders WHERE id = 1;', 'oracle');
+  const f = findCode(single.statements[0].findings, 'no-transaction');
+  assert.ok(f);
+  assert.ok(f.message.includes('SET AUTOCOMMIT'), f.message);
+  assert.ok(!f.message.includes('前にBEGIN'), f.message);
+  const multi = analyzeSQL('DELETE FROM orders WHERE id = 1; DELETE FROM items WHERE id = 1;', 'oracle');
+  const g = multi.globalFindings.find((x) => x.code === 'no-transaction');
+  assert.ok(g);
+  assert.ok(g.message.includes('SET AUTOCOMMIT'), g.message);
+  const generic = analyzeSQL('DELETE FROM orders WHERE id = 1;', 'generic');
+  assert.ok(findCode(generic.statements[0].findings, 'no-transaction').message.includes('BEGIN'));
+});
+
 test('複数の破壊的文があるとglobalFindingsにmultiple-destructiveが出る', () => {
   const result = analyzeSQL('DELETE FROM a WHERE id=1; DELETE FROM b WHERE id=2;', 'generic');
   assert.ok(result.globalFindings.some((f) => f.code === 'multiple-destructive'));
