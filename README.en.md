@@ -83,7 +83,7 @@ Dialect-specific templates are available for UPDATE, DELETE, INSERT SELECT, UPSE
 
 ## Safe execution wrapper
 
-Converted DML can be copied with a transaction start, the original SELECT, candidate count, DML, affected-row check, and a default ROLLBACK. The commit version requires confirmation and contains COMMIT instead. A wrapper never contains both an executable COMMIT and an executable ROLLBACK. Oracle also supports SQL\*Plus interactive and batch wrappers. A transaction alone does not guarantee the same row set; choose isolation and locking where needed.
+Converted DML can be copied with a transaction start, the original SELECT, candidate count, DML, affected-row check, a post-change check (the original SELECT again), and a default ROLLBACK. The ROLLBACK version is meant to stop right after the DML for review; run as a whole, it ends with a rollback (dry run). To make the change permanent, run COMMIT yourself after reviewing, or use the COMMIT version, which requires confirmation before copying. A wrapper never contains both an executable COMMIT and an executable ROLLBACK. For MySQL, `ROW_COUNT()` after UPDATE counts changed rows only; check Rows matched for the matched count. Oracle also supports SQL\*Plus interactive and batch wrappers. A transaction alone does not guarantee the same row set; choose isolation and locking where needed.
 
 ```sh
 printf "SELECT id FROM m_users WHERE id = 1;" | node cli/sqlmegane.mjs convert --to update --dialect mysql --columns name,status -
