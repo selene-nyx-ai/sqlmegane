@@ -349,20 +349,21 @@ function innerSelect(sql) {
   let statement = stripLeadingComments(sql).replace(/;\s*$/, '').trimEnd();
   const tokens = lex(statement);
   const info = finalSelectInfo(tokens);
-  if (!info) return { text: statement, orderByRemoved: false, finalSelectStart: 0 };
+  if (!info) return { text: statement, orderByRemoved: false, finalSelectStart: 0, rowLimit: false, whereFrom: 0 };
   // 最終 SELECT の開始位置。SQL Server は派生表の中に WITH を書けないので、WITH 句をこの位置で切って文頭へ移す
   const finalSelectStart = tokens[info.selectIndex].start;
+  // 最終 SELECT の FROM の位置。選択リストを除いた「条件の部分」を取り出すのに使う
+  const whereFrom = tokens[info.fromIndex].start;
+  // 行数制限（LIMIT / OFFSET / FETCH / TOP）の有無。上位 N 件は ORDER BY が一意でないと再評価で別の行になり、
+  // 確認した SELECT と同じキー集合を再現できないため、キー IN 形では変換しない（呼び出し側で拒否する）
+  const top = tokens.filter((t) => t.depth === 0);
+  const selectAt = top.findIndex((t) => t.start === finalSelectStart);
+  const rowLimit = top.some((t, i) => (['LIMIT', 'OFFSET', 'FETCH'].includes(t.upper) && t.start > whereFrom)
+    || (t.upper === 'TOP' && selectAt >= 0 && i === selectAt + 1));
   const orderIndex = tokens.findIndex((t, i) => i > info.fromIndex && t.depth === 0 && t.upper === 'ORDER'
     && tokens[i + 1] && tokens[i + 1].depth === 0 && tokens[i + 1].upper === 'BY');
-  if (orderIndex < 0) return { text: statement, orderByRemoved: false, finalSelectStart };
-  // 行数制限（LIMIT / OFFSET / FETCH / TOP）がある SELECT では ORDER BY が行集合そのものを決める。
-  // その場合は ORDER BY を落とすと「上位 N 件」の意味が消えて対象が広がるので、何も削らずそのまま派生表にする。
-  const top = tokens.filter((t) => t.depth === 0);
-  const selectAt = top.findIndex((t) => t.start === tokens[info.selectIndex >= 0 ? info.selectIndex : 0].start);
-  const hasRowLimit = top.some((t, i) => (['LIMIT', 'OFFSET', 'FETCH'].includes(t.upper) && t.start > tokens[info.fromIndex].start)
-    || (t.upper === 'TOP' && selectAt >= 0 && i === selectAt + 1));
-  if (hasRowLimit) return { text: statement, orderByRemoved: false, rowLimitKept: true, finalSelectStart };
-  return { text: statement.slice(0, tokens[orderIndex].start).trimEnd(), orderByRemoved: true, finalSelectStart };
+  if (orderIndex < 0 || rowLimit) return { text: statement, orderByRemoved: false, finalSelectStart, rowLimit, whereFrom };
+  return { text: statement.slice(0, tokens[orderIndex].start).trimEnd(), orderByRemoved: true, finalSelectStart, rowLimit, whereFrom };
 }
 
 // generated は WITH 句の文頭移動（SQL Server）や注記コメントを付ける前の本体で検証する
@@ -399,6 +400,16 @@ function convertByKey(sqlText, options) {
     result.inspection = checked; return result;
   }
   const inner = innerSelect(original);
+  // 上位 N 件（LIMIT / OFFSET / FETCH / TOP）は、ORDER BY が一意でないと DML 実行時の再評価で別の行を選ぶ。
+  // ツールは一意性を確認できないので変換しない。確認済みのキーを一時表に保存して固定する手順を案内する
+  if (inner.rowLimit) { const result = unsupported('row-limit', original); result.inspection = checked; return result; }
+  // ロック句（FOR UPDATE / FOR SHARE）は派生表や副問合せにそのまま移せない製品があり、外すとロックの意味が変わる
+  const innerTokens = lex(inner.text);
+  if (innerTokens.some((t, i) => t.upper === 'FOR' && innerTokens[i + 1] && ['UPDATE', 'SHARE'].includes(innerTokens[i + 1].upper))) {
+    const result = unsupported('lock-clause', original); result.inspection = checked; return result;
+  }
+  // 条件の部分（WITH 句＋最終 SELECT の FROM 以降）。更新する列が条件に含まれるかの判定に使う
+  const where = inner.text.slice(0, inner.finalSelectStart) + inner.text.slice(inner.whereFrom);
   const note = inner.orderByRemoved ? '-- SQLMegane: removed the final ORDER BY inside the derived table.\n' : '';
   // 一意性は確認できないので必ず注意を出す。NULL キーと再評価も同様
   const warnings = ['key-uniqueness', 'null-key-ignored', 'subquery-recomputed'];
@@ -428,7 +439,7 @@ function convertByKey(sqlText, options) {
   return {
     status: 'ok', reasonCode: null, reasonCodes: [], reasonParams: {}, mode: 'by-key',
     target: { table: targetTable, alias: null, asWritten: targetTable, outputKey, targetKey },
-    original: original.trim().replace(/;\s*$/, '') + ';', delete: del, update, countSelect,
+    original: original.trim().replace(/;\s*$/, '') + ';', delete: del, update, countSelect, where,
     columnCandidates: [], equivalence: Object.values(invariants).every(Boolean) ? 'proven' : 'unsupported',
     invariants, warnings, inspection: checked,
     syntaxCheck: { delete: check(del, bodies.delete), update: check(update, bodies.update), countSelect: check(countSelect, bodies.countSelect) },
@@ -615,7 +626,7 @@ function convert(sqlText, options) {
   return {
     status: 'ok', reasonCode: null, reasonParams: {},
     target: { table: target.table, alias: target.alias, asWritten: target.asWritten },
-    original: statement.replace(/;\s*$/, '') + ';', delete: del, update, countSelect,
+    original: statement.replace(/;\s*$/, '') + ';', delete: del, update, countSelect, where: whereClause,
     columnCandidates: columnCandidates(statement, tokens, selectIndex, fromIndex, target),
     equivalence, invariants, warnings,
     syntaxCheck: {

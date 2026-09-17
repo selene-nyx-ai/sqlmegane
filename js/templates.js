@@ -13,6 +13,7 @@ const comments = {
     oraRows: 'SQL*Plus のフィードバック（n rows updated / deleted）を確認してください。',
     mysqlRows: 'ROW_COUNT() は UPDATE では値が変わった行数です（同じ値を再設定した行は数えません）。一致行数は Rows matched で確認してください。',
     after: '更新後の内容を確認（DELETE なら 0 行。UPDATE で WHERE に更新した列が含まれる場合も 0 行になる）',
+    afterMasked: '更新する列（{cols}）が条件に含まれるため、下の SELECT では更新後の値を確認できません（0 行になります）。更新前にキーを控えておき、SELECT ... FROM <table> WHERE <key> IN (<控えたキー>) で引き直してください。',
     rollback: 'ここで止めて、影響行数と内容を確認してください。この下まで一括で流すと取り消しになります（予行演習）。確定する場合は、確認のあと COMMIT を自分で実行してください。',
     commit: 'ここで止めて、影響行数と内容を確認してください。この下まで一括で流すと確定します。想定外なら COMMIT の代わりに ROLLBACK を実行してください。',
     genericMerge: '製品がこの MERGE 構文に対応するか確認してください。',
@@ -27,6 +28,7 @@ const comments = {
     oraRows: 'Check SQL*Plus feedback (n rows updated / deleted).',
     mysqlRows: 'For UPDATE, ROW_COUNT() counts rows whose values changed (rows set to the same value are not counted). Check Rows matched for the matched count.',
     after: 'Inspect the rows after the change (0 rows for DELETE; also 0 rows for UPDATE when the WHERE clause uses an updated column)',
+    afterMasked: 'The updated column(s) ({cols}) appear in the condition, so the SELECT below cannot show the new values (it returns 0 rows). Record the keys before the UPDATE and re-check with SELECT ... FROM <table> WHERE <key> IN (<recorded keys>).',
     rollback: 'Stop here and review the affected row count and contents. Running past this point rolls the change back (dry run). To make it permanent, run COMMIT yourself after reviewing.',
     commit: 'Stop here and review the affected row count and contents. Running past this point makes the change permanent. If anything is unexpected, run ROLLBACK instead of COMMIT.',
     genericMerge: 'Confirm that your database product supports this MERGE syntax.',
@@ -76,8 +78,12 @@ function buildSafeBlock(options) {
   else if (d === 'mssql') lines.push('SELECT @@ROWCOUNT AS affected_rows;');
   else if (d === 'postgres') lines.push(c(m.pgRows));
   else if (d === 'oracle') lines.push(c(m.oraRows));
-  // 件数だけでは SET 値の誤りや連鎖変更に気づけないので、元 SELECT をもう一度流して内容を見る
-  lines.push('', c(m.after), String(o.originalSelect || '').trim());
+  // 件数だけでは SET 値の誤りや連鎖変更に気づけないので、元 SELECT をもう一度流して内容を見る。
+  // ただし更新する列が条件に含まれると再実行の SELECT は 0 行になり確認にならないので、その旨と引き直し方を書く
+  const cols = Array.isArray(o.updatedColumns) ? o.updatedColumns.filter((x) => typeof x === 'string' && x.trim()) : [];
+  const words = new Set(String(o.whereText || '').split(/[^A-Za-z0-9_$]+/).map((w) => w.toLowerCase()).filter(Boolean));
+  const masked = cols.filter((col) => words.has(col.trim().replace(/^.*\./, '').replace(/^["`\[]|["`\]]$/g, '').toLowerCase()));
+  lines.push('', c(masked.length ? m.afterMasked.replace('{cols}', masked.join(', ')) : m.after), String(o.originalSelect || '').trim());
   if (commit) lines.push('', c(m.commit), 'COMMIT;', '-- ROLLBACK;');
   else lines.push('', c(m.rollback), 'ROLLBACK;', '-- COMMIT;');
   if (d === 'oracle' && client === 'sqlplus-batch') lines.push('', commit ? 'EXIT' : 'EXIT ROLLBACK');

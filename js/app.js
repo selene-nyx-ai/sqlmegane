@@ -829,7 +829,13 @@ function appendConvertedStages(card, converted, dialect) {
   const client = el('select', { attrs: { 'aria-label': t('ui.client') } });
   for (const [value, key] of [['generic', 'ui.clientGeneric'], ['sqlplus-interactive', 'ui.clientInteractive'], ['sqlplus-batch', 'ui.clientBatch']]) client.appendChild(el('option', { text: t(key), attrs: { value } }));
   client.hidden = dialect !== 'oracle'; safe.appendChild(client);
-  const safeText = (commit) => Templates.buildSafeBlock({ dialect, client: client.value, originalSelect: converted.original, countSelect: converted.countSelect, dml: dmlChoice.value === 'delete' ? converted.delete : updatePre.textContent, locale: I18n.getLocale(), commit });
+  const safeText = (commit) => Templates.buildSafeBlock({
+    dialect, client: client.value, originalSelect: converted.original, countSelect: converted.countSelect,
+    dml: dmlChoice.value === 'delete' ? converted.delete : updatePre.textContent, locale: I18n.getLocale(), commit,
+    // 更新する列が条件に含まれると更新後の確認 SELECT が 0 行になるので、列と条件を渡して注記を切り替える
+    updatedColumns: dmlChoice.value === 'delete' ? [] : [...choices.querySelectorAll('input:checked')].map((input) => input.value),
+    whereText: converted.where,
+  });
   const rollbackButton = el('button', { className: 'btn btn-primary', text: t('ui.copySafeRollback'), attrs: { type: 'button' } });
   rollbackButton.disabled = !proven; rollbackButton.addEventListener('click', () => copyToClipboard(safeText(false), rollbackButton)); safe.appendChild(rollbackButton);
   const commitButton = el('button', { className: 'btn btn-ghost', text: t('ui.copySafeCommit'), attrs: { type: 'button' } });

@@ -57,6 +57,8 @@ WHERE product_id IN (
 
 Its equivalence is defined as: rows in the target table whose key value appears in the original SELECT result. SQLMegane does not move JOIN or WHERE conditions. It places the complete SELECT in one derived table. It removes the final SELECT's `ORDER BY`, which does not affect membership in the `IN` set and may be rejected inside a derived table, and records the removal in a generated comment.
 
+A final SELECT with a row limit (`LIMIT` / `OFFSET` / `FETCH` / `TOP`) is not converted. A top-N query can pick different rows when the DML re-evaluates it unless `ORDER BY` is unique, and the tool cannot verify uniqueness. To act on exactly the rows you checked, save their keys to a temporary table and run the DML against that fixed set (a row limit inside a CTE does not decide the final result set and is not rejected). A SELECT with a locking clause (`FOR UPDATE` / `FOR SHARE`) is not converted either: some products do not accept it inside a derived table, and dropping it changes the locking semantics.
+
 The generated result shows these warnings:
 
 - Choose the primary key or a NOT NULL unique key of the target table (all columns of a composite key). With a non-unique column, rows that share a key value but did not appear in the SELECT are also updated or deleted. The tool cannot verify uniqueness.
@@ -83,7 +85,7 @@ Dialect-specific templates are available for UPDATE, DELETE, INSERT SELECT, UPSE
 
 ## Safe execution wrapper
 
-Converted DML can be copied with a transaction start, the original SELECT, candidate count, DML, affected-row check, a post-change check (the original SELECT again), and a default ROLLBACK. The ROLLBACK version is meant to stop right after the DML for review; run as a whole, it ends with a rollback (dry run). To make the change permanent, run COMMIT yourself after reviewing, or use the COMMIT version, which requires confirmation before copying. A wrapper never contains both an executable COMMIT and an executable ROLLBACK. For MySQL, `ROW_COUNT()` after UPDATE counts changed rows only; check Rows matched for the matched count. Oracle also supports SQL\*Plus interactive and batch wrappers. A transaction alone does not guarantee the same row set; choose isolation and locking where needed.
+Converted DML can be copied with a transaction start, the original SELECT, candidate count, DML, affected-row check, a post-change check (the original SELECT again), and a default ROLLBACK. The ROLLBACK version is meant to stop right after the DML for review; run as a whole, it ends with a rollback (dry run). To make the change permanent, run COMMIT yourself after reviewing, or use the COMMIT version, which requires confirmation before copying. A wrapper never contains both an executable COMMIT and an executable ROLLBACK. For MySQL, `ROW_COUNT()` after UPDATE counts changed rows only; check Rows matched for the matched count. When an UPDATE changes a column that also appears in the condition (`SET status = ... WHERE status = 'ACTIVE'`), the post-change SELECT returns 0 rows, so the wrapper switches to a note telling you to record the keys beforehand and re-check with `WHERE <key> IN (...)`. Oracle also supports SQL\*Plus interactive and batch wrappers. A transaction alone does not guarantee the same row set; choose isolation and locking where needed.
 
 ```sh
 printf "SELECT id FROM m_users WHERE id = 1;" | node cli/sqlmegane.mjs convert --to update --dialect mysql --columns name,status -

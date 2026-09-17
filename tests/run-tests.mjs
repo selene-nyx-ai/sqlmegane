@@ -2777,17 +2777,47 @@ test('by-key UI: 対象表選択と warning 用の文言を i18n 経由で持つ
   assert.match(readProjectFile('css/style.css'), /conversion-warning/);
 });
 
-test('by-key: 行数制限のある SELECT では ORDER BY を落とさず派生表に残す（上位 N 件の意味を保つ）', () => {
+test('by-key: 行数制限（LIMIT / OFFSET / FETCH / TOP）のある SELECT は変換しない（上位 N 件は再評価で別の行になり得る）', () => {
   const B = globalThis.SQLMeganeDmlBuilder;
   const limited = B.convertByKey('SELECT id, score FROM scores s ORDER BY score DESC LIMIT 5', { dialect: 'postgres', targetTable: 'scores', outputKey: 'id' });
-  assert.equal(limited.status, 'ok', JSON.stringify(limited.reasonCodes));
-  assert.ok(limited.delete.includes('ORDER BY score DESC LIMIT 5) sqlmegane_src'), limited.delete);
-  assert.ok(!limited.delete.includes('removed the final ORDER BY'), limited.delete);
+  assert.equal(limited.status, 'unsupported'); assert.equal(limited.reasonCode, 'row-limit');
+  const noOrder = B.convertByKey('SELECT id FROM scores LIMIT 5', { dialect: 'mysql', targetTable: 'scores', outputKey: 'id' });
+  assert.equal(noOrder.reasonCode, 'row-limit');
+  const fetch = B.convertByKey('SELECT id FROM scores ORDER BY score DESC FETCH FIRST 5 ROWS ONLY', { dialect: 'oracle', targetTable: 'scores', outputKey: 'id' });
+  assert.equal(fetch.reasonCode, 'row-limit');
+  const top = B.convertByKey('SELECT TOP 5 id FROM scores ORDER BY score DESC', { dialect: 'mssql', targetTable: 'scores', outputKey: 'id' });
+  assert.equal(top.reasonCode, 'row-limit');
+  // CTE の中の行数制限は最終 SELECT の対象集合を決めないので拒否しない
+  const inCte = B.convertByKey('WITH top5 AS (SELECT id FROM scores ORDER BY score DESC LIMIT 5) SELECT s.id FROM scores s JOIN top5 t ON t.id = s.id', { dialect: 'postgres', targetTable: 'scores', outputKey: 'id' });
+  assert.equal(inCte.status, 'ok', JSON.stringify(inCte.reasonCodes));
   const plain = B.convertByKey('SELECT id, score FROM scores s ORDER BY score DESC', { dialect: 'postgres', targetTable: 'scores', outputKey: 'id' });
   assert.ok(!plain.delete.includes('ORDER BY score'), plain.delete);
   assert.ok(plain.delete.includes('removed the final ORDER BY'), plain.delete);
-  const top = B.convertByKey('SELECT TOP 5 id FROM scores ORDER BY score DESC', { dialect: 'mssql', targetTable: 'scores', outputKey: 'id' });
-  assert.ok(top.delete.includes('TOP 5 id FROM scores ORDER BY score DESC) sqlmegane_src'), top.delete);
+});
+test('by-key: ロック句（FOR UPDATE / FOR SHARE）のある SELECT は変換しない', () => {
+  const B = globalThis.SQLMeganeDmlBuilder;
+  assert.equal(B.convertByKey('SELECT id FROM t WHERE x = 1 FOR UPDATE', { dialect: 'postgres', targetTable: 't', outputKey: 'id' }).reasonCode, 'lock-clause');
+  assert.equal(B.convertByKey('SELECT id FROM t WHERE x = 1 FOR SHARE', { dialect: 'postgres', targetTable: 't', outputKey: 'id' }).reasonCode, 'lock-clause');
+});
+test('convert / convertByKey: 条件の部分を where として返す', () => {
+  const B = globalThis.SQLMeganeDmlBuilder;
+  const single = B.convert("SELECT id FROM t WHERE status = 'ACTIVE'", { dialect: 'postgres' });
+  assert.equal(single.where, "WHERE status = 'ACTIVE'");
+  const byKey = B.convertByKey("SELECT e.id, e.status FROM t e JOIN u ON u.id = e.id WHERE e.status = 'ACTIVE'", { dialect: 'postgres', targetTable: 't', outputKey: 'id' });
+  assert.ok(byKey.where.startsWith('FROM t e JOIN u'), byKey.where);
+  assert.ok(byKey.where.includes("WHERE e.status = 'ACTIVE'"), byKey.where);
+  assert.ok(!byKey.where.includes('SELECT e.id, e.status'), byKey.where);
+});
+test('手順つきブロック: 更新する列が条件に含まれると、更新後の確認が 0 行になる注記と引き直し方に切り替わる', () => {
+  const base = { dialect: 'postgres', client: 'generic', originalSelect: "SELECT id, status FROM t WHERE status = 'ACTIVE';", countSelect: "SELECT COUNT(*) FROM t WHERE status = 'ACTIVE';", dml: "UPDATE t SET status = 'LEFT' WHERE status = 'ACTIVE';", locale: 'ja', whereText: "WHERE status = 'ACTIVE'" };
+  const masked = Templates.buildSafeBlock({ ...base, updatedColumns: ['status'] });
+  assert.ok(masked.includes('更新する列（status）が条件に含まれる'), masked);
+  assert.ok(masked.includes('WHERE <key> IN ('), masked);
+  const other = Templates.buildSafeBlock({ ...base, updatedColumns: ['name'] });
+  assert.ok(!other.includes('更新する列（'), other);
+  assert.ok(other.includes('更新後の内容を確認'), other);
+  const en = Templates.buildSafeBlock({ ...base, updatedColumns: ['e.status'], locale: 'en' });
+  assert.ok(en.includes('(e.status) appear in the condition'), en);
 });
 
 test('by-key: 同名のキー出力が複数あれば ambiguous-key', () => {

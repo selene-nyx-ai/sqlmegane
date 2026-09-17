@@ -416,7 +416,7 @@ async function runSubcommand(command, argv) {
   if (!opts.json) for (const f of selfFindings) process.stderr.write(`${findingLine(f)}\n`);
   if (!opts.json && mode === 'by-key') for (const code of converted.warnings) process.stderr.write(`${t(`dml.warning.${code}`)}\n`);
   let output = dml;
-  if (opts.safeBlock) output = Templates.buildSafeBlock({ dialect, client: opts.safeBlock, originalSelect: converted.original, countSelect: converted.countSelect, dml: output, locale: opts.lang, commit: opts.commit });
+  if (opts.safeBlock) output = Templates.buildSafeBlock({ dialect, client: opts.safeBlock, originalSelect: converted.original, countSelect: converted.countSelect, dml: output, locale: opts.lang, commit: opts.commit, updatedColumns: opts.to === 'update' ? opts.columns : [], whereText: converted.where });
   if (opts.json) {
     const placeholders = [...new Set(output.match(/<[a-z_]+>/g) || [])];
     process.stdout.write(JSON.stringify({
