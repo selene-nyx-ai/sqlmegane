@@ -594,7 +594,7 @@ const en = { ...ja, ...englishFindings,
 const backupMessages = {
   'compApply.start': ['補償 1/3 の全検査合格後だけ、同じ接続・トランザクションで実行。1 件でも不一致なら実行禁止。', 'Execute on the same connection and transaction only after every compensation 1/3 check passes. Do not execute if any row mismatches.'],
   'compCommit.pass': ['合格条件：補償 2/3 の全検査が合格、補償の確定完了を確認。SQL Server @@TRANCOUNT = 0。', 'Pass: all compensation 2/3 checks passed; confirm compensation committed. SQL Server @@TRANCOUNT = 0.'],
-  planned: ['PostgreSQL 18 で検証済み（実 DB 試験 13 項目、2026-09-20）', 'Verified on PostgreSQL 18 (13 live-database checks, 2026-09-20)'],
+  planned: ['PostgreSQL 18.3 で検証済み（実 DB 試験 13 項目、2026-09-20）', 'Verified on PostgreSQL 18.3 (13 live-database checks, 2026-09-20)'],
   reference: ['公式ドキュメントに基づく参考型紙・実機未検証', 'Reference template based on official documentation; not tested on a database'],
   errors: ['SQL エラー・タイムアウト・取消し・検査結果不明はすべて不合格。同じ接続で継続中なら ROLLBACK し終了確認後やり直す。接続喪失・COMMIT 応答不明は停止。', 'Any SQL error, timeout, cancellation or unknown check result is a failure. If still active on the same connection, ROLLBACK, confirm completion and restart. Stop on connection loss or an unknown COMMIT outcome.'],
   unknown: ['接続喪失・COMMIT 応答不明は結果不明として停止、再実行・補償禁止。再接続後の ROLLBACK では取り消せない。元接続の終了と退避表・対象表・作業記録から確定結果を確認。', 'Connection loss or no COMMIT response means an unknown outcome: stop; do not retry or compensate. ROLLBACK after reconnecting cannot undo a committed transaction. Confirm the original connection ended and establish the outcome from backup, target and work records.'],
@@ -619,6 +619,7 @@ const backupMessages = {
   keyColumns: ['キー列（複合キーは全列）', 'Key columns (all columns of a composite key)'],
   assignments: ['UPDATE：更新列と単純リテラル値', 'UPDATE: columns and literal values'],
   copyCommit: ['COMMIT をコピー（退避と変更が一緒に確定する）', 'Copy COMMIT (commit backup and change together)'],
+  copyCompCommit: ['補償を確定する COMMIT をコピー', 'Copy COMMIT (commit the compensation)'],
   confirmCommit: ['全検査合格後に確定する', 'Commit after all checks pass'],
 };
 ja['ui.template.backup-table'] = '空の退避表を作る'; en['ui.template.backup-table'] = 'Create an empty backup table';
@@ -658,6 +659,8 @@ const backupReasons = {
   'insert-columns-not-in-backup': ['書き戻す列はキー全列を含み、退避列の範囲内にしてください。', 'Insert columns must contain every key and be a subset of the backup columns.'],
   'partial-compensation-unsupported': ['部分補償は対象外です。', 'Partial compensation is unsupported.'],
   'column-not-in-select': ['退避列とキー列は、元の SELECT に直接書かれた出力列から選んでください（SELECT * や式の列は使えません）。', 'Backup and key columns must be direct output columns of the SELECT (SELECT * and expression columns cannot be used).'],
+  'predicate-unsupported': ['WHERE にバックスラッシュ、コメント、または別名で修飾した関数呼び出しがあり、別名の付け替えを安全にできません。条件を書き換えてください。', 'The WHERE clause contains a backslash, a comment, or an alias-qualified function call, so the alias cannot be rewritten safely. Rewrite the condition.'],
+  'template-split-failed': ['補償型紙を段階に分割できませんでした（内部エラー）。', 'The compensation template could not be split into stages (internal error).'],
   'subquery-predicate': ['WHERE に副問い合わせ（SELECT / EXISTS）を含む SELECT は、ロック対象を確定できないため対象外です。副問い合わせを使わない条件に書き換えてください。', 'A WHERE clause containing a subquery (SELECT / EXISTS) is unsupported because the rows to lock cannot be fixed. Rewrite the condition without a subquery.'],
 };
 for (const [key, values] of Object.entries(backupReasons)) {

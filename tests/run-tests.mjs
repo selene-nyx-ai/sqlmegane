@@ -3078,6 +3078,39 @@ test('backup subquery predicate has its own reason code', () => {
   assert.equal(r.status, 'unsupported'); assert.ok(r.reasonCodes.includes('subquery-predicate'));
   assert.ok(!r.reasonCodes.includes('lock-method-undefined'));
 });
+// Publish review 2026-09-20 (Codex): alias rewriting must never change literal or function meaning.
+test('backup rejects predicates where alias rewriting would change meaning', () => {
+  const bs = buildBackup({ dialect: 'mysql' }, "SELECT d.id, d.value FROM demo d WHERE d.value = 'x\\' d.id'");
+  assert.equal(bs.status, 'unsupported'); assert.ok(bs.reasonCodes.includes('predicate-unsupported'));
+  const fn = buildBackup({}, 'SELECT d.id, d.value FROM demo d WHERE d.fn(d.id) = 1');
+  assert.equal(fn.status, 'unsupported'); assert.ok(fn.reasonCodes.includes('predicate-unsupported'));
+  const comment = buildBackup({}, 'SELECT id, value FROM demo WHERE id = 1 -- hi');
+  assert.equal(comment.status, 'unsupported'); assert.ok(comment.reasonCodes.includes('predicate-unsupported'));
+  const block = buildBackup({}, 'SELECT id, value FROM demo WHERE /* c */ id = 1');
+  assert.ok(block.reasonCodes.includes('predicate-unsupported'));
+  const okLiteral = buildBackup({}, "SELECT d.id, d.value FROM demo d WHERE d.value = '-- d.id'");
+  assert.equal(okLiteral.status, 'ok'); assert.match(okLiteral.stages.backup.sql, /t\.value = '-- d\.id'\nFOR UPDATE OF t;/);
+});
+test('backup identifier quoting follows the dialect', () => {
+  assert.equal(buildBackup({ backupTable: '`demo_bk`' }).status, 'unsupported');
+  assert.equal(buildBackup({ backupTable: '[demo_bk]' }).status, 'unsupported');
+  assert.equal(buildBackup({ backupTable: '"demo_bk"' }).status, 'ok');
+  assert.equal(buildBackup({ dialect: 'mysql', backupTable: '`demo_bk`' }).status, 'ok');
+  assert.equal(buildBackup({ dialect: 'mysql', backupTable: '"demo_bk"' }).status, 'unsupported');
+  assert.equal(buildBackup({ dialect: 'mssql', backupTable: '[demo_bk]' }).status, 'ok');
+});
+test('backup duplicate detection respects quoted-identifier case per dialect', () => {
+  const pg = buildBackup({ backupColumns: ['"id"', '"ID"', 'value'] }, 'SELECT "id", "ID", value FROM demo WHERE value = \'old\';');
+  assert.ok(!pg.reasonCodes.includes('duplicate-column'));
+  const my = buildBackup({ dialect: 'mysql', backupColumns: ['id', 'ID', 'value'] }, "SELECT id, ID, value FROM demo WHERE value = 'old';");
+  assert.ok(my.reasonCodes.includes('duplicate-column'));
+});
+test('backup compensation stages are labelled reference even for postgres', () => {
+  const r = buildBackup();
+  for (const sql of [r.compensation.precheck.sql, r.compensation.apply.sql, r.compensation.finish.commit.sql]) assert.match(sql, /^-- Reference template/);
+  assert.match(r.stages.backup.sql, /^-- Verified on PostgreSQL 18\.3/);
+  assert.match(globalThis.SQLMeganeTemplates.get('compensate-update', 'postgres', { locale: 'en' }), /^-- Reference template/);
+});
 test('backup oracle legacy compatible shortens the default name to 30 bytes', () => {
   const r = buildBackup({ dialect: 'oracle', backupTable: undefined, oracleCompatible: 'legacy' }, "SELECT id, value FROM a_rather_long_table_name_here WHERE value = 'old';");
   assert.equal(r.status, 'ok'); assert.ok(Buffer.byteLength(r.backupTable) <= 30, r.backupTable);

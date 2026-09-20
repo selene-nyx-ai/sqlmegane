@@ -96,7 +96,8 @@ function backupTemplate(kind, d, o) {
   const B = globalThis.SQLMeganeDmlBuilder;
   const t = (key) => B.backupMessage(key, o.locale);
   // bare: the caller (backupSet.stage) prints tier / pass / fail / errors itself, so skip them here.
-  const head = o.bare ? '' : `-- ${t(d === 'postgres' ? 'planned' : 'reference')}\n-- ${t('errors')}\n`;
+  // Compensation templates are always "reference" (column attributes unverified); only the backup-table DDL follows the dialect tier.
+  const head = o.bare ? '' : `-- ${t(kind === 'backup-table' && d === 'postgres' ? 'planned' : 'reference')}\n-- ${t('errors')}\n`;
   const table = o.table || '<table>', bk = o.backupTable || '<backup_table>';
   const cols = o.columns || ['<column>'], keys = o.keys || ['<key>'];
   if (kind === 'backup-table') return `${head}${o.bare ? '' : `-- ${t('prepare.pass')}\n-- ${t('prepare.fail')}\n`}-- ${t('prepare.note')}\n${d === 'mssql' ? `CREATE TABLE ${bk} (<column_definitions>);` : `CREATE TABLE ${bk} AS SELECT ${cols.join(', ')} FROM ${table} WHERE 1 = 0;`}\n`;

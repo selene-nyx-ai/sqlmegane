@@ -884,25 +884,23 @@ function appendBackupSet(card, sql, dialect, converted) {
     }
     for (const warning of r.warnings) output.appendChild(el('p', { className: 'hint', text: warning }));
     const append = (parent, stage, commit) => {
-      const condition = el('p', { className: 'hint', text: `${stage.passCondition} ${stage.onFail}` });
-      const block = foldedSqlBlock(stage.title, () => stage.sql, true, condition);
-      // The conditions stay visible without opening the SQL body.
-      block.wrap.insertBefore(condition, block.pre);
+      const block = foldedSqlBlock(stage.title, () => stage.sql, true);
+      // The conditions stay visible in the summary without opening the SQL body (shown once, not repeated inside).
       block.wrap.querySelector('summary').appendChild(el('span', { className: 'backup-condition', text: `${stage.passCondition} ${stage.onFail}` }));
-      if (commit) block.wrap.querySelector('button').textContent = t('dml.backup.copyCommit');
+      if (commit) block.wrap.querySelector('button').textContent = t(commit === 'comp' ? 'dml.backup.copyCompCommit' : 'dml.backup.copyCommit');
       block.wrap.querySelector('button').addEventListener('click', () => block.wrap.scrollIntoView({ behavior: 'smooth', block: 'nearest' }));
       parent.appendChild(block.wrap);
     };
     for (const name of ['prepare', 'precheck', 'backup', 'change']) append(output, r.stages[name]);
-    const finish = (parent, stages) => {
+    const finish = (parent, stages, kind = 'main') => {
       append(parent, stages.rollback);
       const commit = el('details', { className: 'conversion-step' }); commit.appendChild(el('summary', { className: 'conversion-head', text: t('dml.backup.confirmCommit') }));
-      append(commit, stages.commit, true); parent.appendChild(commit);
+      append(commit, stages.commit, kind); parent.appendChild(commit);
     };
     finish(output, r.stages.finish);
     const comp = el('details', { className: 'conversion-step' }); comp.appendChild(el('summary', { className: 'conversion-head', text: t('dml.backup.compensation') }));
     comp.appendChild(el('p', { className: 'conversion-warning', text: t('dml.backup.identity') }));
-    append(comp, r.compensation.precheck); append(comp, r.compensation.apply); finish(comp, r.compensation.finish); output.appendChild(comp);
+    append(comp, r.compensation.precheck); append(comp, r.compensation.apply); finish(comp, r.compensation.finish, 'comp'); output.appendChild(comp);
   }
   backupTable.addEventListener('input', draw); operation.addEventListener('change', draw);
   section.addEventListener('toggle', () => { if (section.open) section.scrollIntoView({ behavior: 'smooth', block: 'nearest' }); });
