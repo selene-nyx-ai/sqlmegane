@@ -3156,7 +3156,8 @@ test('trailing line comment in the original SELECT does not swallow generated cl
   // Codex review round 4: settings-dependent string syntax cannot fool an over-approximation.
   for (const [sql, dialect] of [["SELECT id FROM demo WHERE ARRAY[']'] IS NOT NULL -- VIP", 'postgres'], ["SELECT id FROM demo WHERE note = $日本$'$日本$ -- VIP", 'postgres'], ["SELECT id FROM demo WHERE note = 'a\\' -- VIP", 'mysql'], ["SELECT id FROM demo WHERE note = 'a\\'b' -- VIP", 'postgres']]) {
     const r = DmlBuilder.convertByKey(sql, { dialect, targetTable: 'demo', outputKey: 'id' });
-    if (r.status === 'ok') assert.match(r.delete, /-- VIP\n\) sqlmegane_src\);$/, sql);
+    assert.equal(r.status, 'ok', sql); assert.match(r.delete, /-- VIP\n\) sqlmegane_src\);$/, sql);
+    // The single-table form may reject some of these (e.g. MySQL backslash strings); when it converts, it must terminate on a new line.
     const c = DmlBuilder.convert(sql, { dialect });
     if (c.status === 'ok') assert.match(c.delete, /-- VIP\n;$/, sql);
   }
