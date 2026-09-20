@@ -3142,6 +3142,17 @@ test('trailing line comment in the original SELECT does not swallow generated cl
   assert.match(DmlBuilder.convert('SELECT id FROM demo WHERE code# = 1', { dialect: 'oracle' }).delete, /code# = 1;$/);
   assert.match(DmlBuilder.convert('SELECT id FROM demo WHERE id = 1 /* -- VIP */', { dialect: 'postgres' }).delete, /\*\/;$/);
   assert.match(DmlBuilder.convert('SELECT id FROM demo WHERE id = 1 # VIP', { dialect: 'mysql' }).delete, /# VIP\n;$/);
+  // Codex review round 2: $ inside identifiers, MySQL backslash escapes, nested block comments (PostgreSQL).
+  const dollarIdent = DmlBuilder.convertByKey('SELECT id FROM demo WHERE code$tag$ = 1 -- VIP', { dialect: 'postgres', targetTable: 'demo', outputKey: 'id' });
+  assert.match(dollarIdent.delete, /-- VIP\n\) sqlmegane_src\);$/);
+  const myEscape = DmlBuilder.convert("SELECT id FROM demo WHERE note = 'a\\'b' -- VIP", { dialect: 'mysql' });
+  assert.match(myEscape.delete, /-- VIP\n;$/);
+  const myEscapeKey = DmlBuilder.convertByKey("SELECT id FROM demo WHERE note = 'a\\'b' -- VIP", { dialect: 'mysql', targetTable: 'demo', outputKey: 'id' });
+  assert.match(myEscapeKey.delete, /-- VIP\n\) sqlmegane_src\);$/);
+  const nested = DmlBuilder.convert("SELECT id FROM demo WHERE id = 1 /* outer /* inner */ ' */ -- VIP", { dialect: 'postgres' });
+  assert.match(nested.delete, /-- VIP\n;$/);
+  // Non-PostgreSQL block comments end at the first */ (the rest is not a comment).
+  assert.match(DmlBuilder.convert("SELECT id FROM demo WHERE id = 1 /* a /* b */ AND id = 1", { dialect: 'mysql' }).delete, /AND id = 1;$/);
   // Backup stage A reuses the single-table count SELECT, so it must also terminate correctly.
   const backup = buildBackup({}, "SELECT id, value FROM demo WHERE value = 'old' AND id > 0");
   assert.equal(backup.status, 'ok'); assert.match(backup.stages.precheck.sql, /AND id > 0;\n/);

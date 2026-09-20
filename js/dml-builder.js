@@ -818,28 +818,44 @@ function hasAlternativeQuote(sql) {
 // Oracle q'…' alternative quotes cannot hide or fake a trailing line comment.
 function endsWithLineComment(text, dialect) {
   const s = String(text || '').trimEnd();
-  const hashComments = dialect === 'mysql';
+  const isMysql = dialect === 'mysql', isPostgres = dialect === 'postgres';
   let i = 0, inLine = false;
   const skipTo = (close) => { const at = s.indexOf(close, i); i = at < 0 ? s.length : at + close.length; };
+  // MySQL string literals ('…' and "…") use backslash escapes unless NO_BACKSLASH_ESCAPES is set: treat \x as escaped.
+  const skipString = (quote) => {
+    i++;
+    while (i < s.length) {
+      if (isMysql && s[i] === '\\') { i += 2; continue; }
+      if (s[i] === quote && s[i + 1] === quote) { i += 2; continue; }
+      if (s[i++] === quote) break;
+    }
+  };
   while (i < s.length) {
     const c = s[i], n = s[i + 1] || '';
     if (inLine) { if (c === '\n') inLine = false; i++; continue; }
     if (c === '-' && n === '-') { inLine = true; i += 2; continue; }
-    if (hashComments && c === '#') { inLine = true; i++; continue; }
-    if (c === '/' && n === '*') { i += 2; skipTo('*/'); continue; }
+    if (isMysql && c === '#') { inLine = true; i++; continue; }
+    if (c === '/' && n === '*') {
+      // PostgreSQL block comments nest; other dialects end at the first */.
+      let depth = 1; i += 2;
+      while (i < s.length && depth > 0) {
+        if (isPostgres && s[i] === '/' && s[i + 1] === '*') { depth++; i += 2; continue; }
+        if (s[i] === '*' && s[i + 1] === '/') { depth--; i += 2; continue; }
+        i++;
+      }
+      continue;
+    }
     if (/[qQ]/.test(c) && n === "'" && (i === 0 || !/[A-Za-z0-9_$#]/.test(s[i - 1]) || (/[nN]/.test(s[i - 1]) && (i === 1 || !/[A-Za-z0-9_$#]/.test(s[i - 2]))))) {
       const open = s[i + 2] || '', close = { '[': ']', '(': ')', '{': '}', '<': '>' }[open] || open;
       i += 3; skipTo(close + "'"); continue;
     }
-    if (c === "'") {
-      i++;
-      while (i < s.length) { if (s[i] === "'" && s[i + 1] === "'") { i += 2; continue; } if (s[i++] === "'") break; }
-      continue;
-    }
-    if (c === '$') {
+    if (c === "'") { skipString("'"); continue; }
+    // Dollar quoting is PostgreSQL only, and `$` inside an identifier (code$tag$) is not a quote start.
+    if (isPostgres && c === '$' && (i === 0 || !/[A-Za-z0-9_\u0080-￿]/.test(s[i - 1]))) {
       const m = s.slice(i).match(/^\$[A-Za-z_0-9]*\$/);
       if (m) { i += m[0].length; skipTo(m[0]); continue; }
     }
+    if (isMysql && c === '"') { skipString('"'); continue; }
     if (c === '"' || c === '`' || c === '[') {
       const close = c === '[' ? ']' : c; i++;
       while (i < s.length) { if (s[i] === close && s[i + 1] === close) { i += 2; continue; } if (s[i++] === close) break; }
