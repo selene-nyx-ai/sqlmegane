@@ -784,10 +784,13 @@ function appendByKeyChooser(card, sql, dialect, inspection) {
 function appendConvertedStages(card, converted, dialect) {
   const checked = analyzeSQL([converted.delete, converted.update].join(String.fromCharCode(10)), dialect, { oracleVersion: els.oracleVersion.value });
   const seen = new Set();
+  // `unfilled-placeholder` comes from the tool's own `<column> = <value>` template, not from the user's condition (same exclusion as the CLI).
   const issues = checked.statements.flatMap((s) => s.findings || [])
-    .filter((f) => ['danger', 'warning'].includes(f.severity) && !seen.has(f.code) && seen.add(f.code));
+    .filter((f) => ['danger', 'warning'].includes(f.severity) && f.code !== 'unfilled-placeholder' && !seen.has(f.code) && seen.add(f.code));
   const dangers = issues.filter((f) => f.severity === 'danger');
-  let acknowledged = false;
+  // Shared with the backup set below: the same original condition must be acknowledged there too.
+  const gate = { dangers, acknowledged: false, listeners: [] };
+  converted.dangerGate = gate;
   const body = el('div');
   if (issues.length) {
     const box = el('div', { className: `conversion-issues ${dangers.length ? 'conversion-issues-danger' : 'conversion-issues-warning'}` });
@@ -801,14 +804,14 @@ function appendConvertedStages(card, converted, dialect) {
     if (dangers.length) {
       const ack = el('label', { className: 'conversion-ack' });
       const input = el('input', { attrs: { type: 'checkbox' } });
-      input.addEventListener('change', () => { acknowledged = input.checked; render(); });
+      input.addEventListener('change', () => { gate.acknowledged = input.checked; render(); for (const fn of gate.listeners) fn(); });
       ack.append(input, document.createTextNode(t('ui.dmlAck')));
       box.appendChild(ack);
     }
     card.appendChild(box);
   }
   card.appendChild(body);
-  function render() { body.replaceChildren(); renderConvertedBody(body, converted, dialect, !dangers.length || acknowledged); }
+  function render() { body.replaceChildren(); renderConvertedBody(body, converted, dialect, !dangers.length || gate.acknowledged); }
   render();
   return card;
 }
@@ -879,6 +882,10 @@ function renderConvertedBody(card, converted, dialect, allowed) {
 }
 
 function appendBackupSet(card, sql, dialect, converted) {
+  // Same gate as the converted stages: a full-table (or always-true) condition must be acknowledged before copying.
+  const gate = converted.dangerGate;
+  const allowed = () => !gate || !gate.dangers.length || gate.acknowledged;
+  if (gate) gate.listeners.push(() => draw());
   const section = el('details', { className: 'conversion-step backup-set' });
   section.appendChild(el('summary', { className: 'conversion-head', text: t('dml.backup.title') }));
   const form = el('div', { className: 'backup-inputs' });
@@ -909,6 +916,7 @@ function appendBackupSet(card, sql, dialect, converted) {
   const output = el('div'); section.appendChild(output); card.appendChild(section);
   function draw() {
     assignments.hidden = operation.value !== 'update'; output.replaceChildren();
+    if (!allowed()) output.appendChild(el('p', { className: 'conversion-warning', text: t('ui.backupBlocked') }));
     output.appendChild(el('p', { className: 'conversion-warning', text: t(`dml.backup.${dialect === 'postgres' ? 'planned' : 'reference'}`) }));
     const r = DmlBuilder.backupSet(sql, { dialect, shape: 'single', backupTable: backupTable.value, ...selected, to: operation.value, assignments: operation.value === 'update' ? assignmentInputs.filter((x) => x.chosen.checked).map((x) => ({ column: x.column, value: x.value.value })) : [], locale: I18n.getLocale() });
     if (r.status !== 'ok') {
@@ -916,8 +924,9 @@ function appendBackupSet(card, sql, dialect, converted) {
       output.appendChild(sqlCopyBlock(t('dml.backup.title'), '', false)); return;
     }
     for (const warning of r.warnings) output.appendChild(el('p', { className: 'hint', text: warning }));
-    const append = (parent, stage, commit) => {
-      const block = foldedSqlBlock(stage.title, () => stage.sql, true);
+    const append = (parent, stage, commit, always) => {
+      // Everything except ROLLBACK is blocked while the original condition's danger is unacknowledged.
+      const block = foldedSqlBlock(stage.title, () => stage.sql, always || allowed());
       // The conditions stay visible in the summary without opening the SQL body (shown once, not repeated inside).
       block.wrap.querySelector('summary').appendChild(el('span', { className: 'backup-condition', text: `${stage.passCondition} ${stage.onFail}` }));
       if (commit) block.wrap.querySelector('button').textContent = t(commit === 'comp' ? 'dml.backup.copyCompCommit' : 'dml.backup.copyCommit');
@@ -926,7 +935,7 @@ function appendBackupSet(card, sql, dialect, converted) {
     };
     for (const name of ['prepare', 'precheck', 'backup', 'change']) append(output, r.stages[name]);
     const finish = (parent, stages, kind = 'main') => {
-      append(parent, stages.rollback);
+      append(parent, stages.rollback, undefined, true);
       const commit = el('details', { className: 'conversion-step' }); commit.appendChild(el('summary', { className: 'conversion-head', text: t('dml.backup.confirmCommit') }));
       append(commit, stages.commit, kind); parent.appendChild(commit);
     };
