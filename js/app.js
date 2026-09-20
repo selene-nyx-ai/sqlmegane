@@ -967,15 +967,16 @@ function renderDmlBuilder(sql, dialect) {
     // （赤い「変換できません」が先頭にあると非対応に見える、というしぐれさんの指摘 2026-09-16）。
     card.appendChild(el('p', { className: 'conversion-lead', text: t('ui.byKeyLead') }));
     appendByKeyChooser(card, sql, dialect, inspection);
-    const why = el('details', { className: 'conversion-step conversion-why' });
-    why.appendChild(el('summary', { text: t('ui.singleTableReasons', { count: reasonCodes.length }) }));
-    for (const code of reasonCodes) why.appendChild(el('p', { className: 'conversion-error', text: t(`dml.reason.${code}`, converted.reasonParams) }));
-    why.appendChild(el('p', { className: 'hint', text: t('dml.hint.singleTable') }));
+    // 直す必要のない情報なので、折りたたまず・赤くせず、灰色の 1 段落で（折りたたむと「直せ」に見える、というしぐれさん指摘 2026-09-20）
+    const why = el('div', { className: 'conversion-step conversion-why' });
+    why.appendChild(el('p', { className: 'hint', text: t('ui.singleTableSkipped') }));
+    why.appendChild(el('p', { className: 'hint conversion-why-list', text: reasonCodes.map((code) => t(`dml.reason.${code}`, converted.reasonParams)).join(' ') }));
     card.appendChild(why);
     return card;
   }
+  // どちらの経路も使えない: 直す必要があるので、赤字で開いたまま出し、どう直すかを添える
   for (const code of reasonCodes) card.appendChild(el('p', { className: 'conversion-error', text: t(`dml.reason.${code}`, converted.reasonParams) }));
-  card.appendChild(el('p', { className: 'hint', text: t('dml.hint.singleTable') }));
+  card.appendChild(el('p', { className: 'hint', text: t('dml.hint.singleTableOnly') }));
   return card;
 }
 
