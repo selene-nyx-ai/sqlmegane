@@ -19,6 +19,10 @@ It is an early-stage tool and feedback is welcome. See [Author](#author) for who
 
 SQL analysis makes no network requests and stays in the browser. The app has no analytics or telemetry (see [Privacy & how it runs](#privacy--how-it-runs)).
 
+### Links with SQL (“try this SQL” from an article)
+
+Open `https://selene-nyx-ai.github.io/sqlmegane/en/#sql=<encodeURIComponent(SQL)>&dialect=<auto|generic|mysql|postgres|mssql|oracle>` and the SQL is loaded into the input with the result shown. The fragment after `#` is never sent to the server, so the SQL does not appear in GitHub Pages access logs either. Example: [try `DELETE FROM t_log;`](https://selene-nyx-ai.github.io/sqlmegane/en/#sql=DELETE%20FROM%20t_log%3B&dialect=mysql)
+
 Example. Paste `DELETE FROM t_log;` with the MySQL dialect and you get:
 
 ```

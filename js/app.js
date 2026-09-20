@@ -1095,6 +1095,23 @@ for (const kind of TEMPLATE_KINDS) {
   els.templateButtons.appendChild(button);
 }
 els.templateCopy.addEventListener('click', () => copyToClipboard(els.templateSql.textContent, els.templateCopy));
+// 記事などから「この SQL で試す」リンクで直接結果まで飛べるようにする（#sql=<encodeURIComponent した SQL>&dialect=<方言>）。
+// URL のハッシュ部分はサーバーに送られないので、SQL を外部に出さない方針と両立する。値はテキストとして textarea に入れるだけ。
+function applyHashSql() {
+  const hash = (globalThis.location && globalThis.location.hash || '').replace(/^#/, '');
+  if (!hash) return false;
+  const params = new URLSearchParams(hash);
+  const sql = params.get('sql');
+  if (sql === null) return false;
+  const dialect = params.get('dialect');
+  if (dialect && [...els.dialect.options].some((o) => o.value === dialect)) els.dialect.value = dialect;
+  els.input.value = sql;
+  showDmlBuilder = false;
+  refreshControls();
+  return true;
+}
+globalThis.addEventListener('hashchange', () => { if (applyHashSql()) render(); });
 refreshControls();
+applyHashSql();
 // 初期表示
 render();

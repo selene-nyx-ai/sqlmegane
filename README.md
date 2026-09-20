@@ -28,6 +28,10 @@ v2 から、MySQL / PostgreSQL / SQL Server については本物のSQLパーサ
 
 ローカルサーバーを立てる必要はありません。オフラインでも動作します。
 
+### SQL 付きリンク（記事などから「この SQL で試す」）
+
+`https://selene-nyx-ai.github.io/sqlmegane/#sql=<encodeURIComponent した SQL>&dialect=<auto|generic|mysql|postgres|mssql|oracle>` の形のリンクを開くと、SQL が入力欄に入った状態で結果まで表示します。`#` 以降（フラグメント）はブラウザがサーバーへ送らないため、SQL は GitHub Pages のアクセスログにも残りません。英語 UI は `/en/#sql=...`。例: [`DELETE FROM t_log;` を試す](https://selene-nyx-ai.github.io/sqlmegane/#sql=DELETE%20FROM%20t_log%3B&dialect=mysql)
+
 ### CLI（CI や実行前フック向け）
 
 ブラウザ版と同じ解析コアを Node.js（18 以上）から使えます。追加のインストールは不要です。
