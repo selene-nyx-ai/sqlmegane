@@ -657,6 +657,8 @@ const backupReasons = {
   'unfilled-placeholder': ['未記入の値、プレースホルダ、または不正な識別子があります。', 'A value is missing, a placeholder is unfilled, or an identifier is invalid.'],
   'insert-columns-not-in-backup': ['書き戻す列はキー全列を含み、退避列の範囲内にしてください。', 'Insert columns must contain every key and be a subset of the backup columns.'],
   'partial-compensation-unsupported': ['部分補償は対象外です。', 'Partial compensation is unsupported.'],
+  'column-not-in-select': ['退避列とキー列は、元の SELECT に直接書かれた出力列から選んでください（SELECT * や式の列は使えません）。', 'Backup and key columns must be direct output columns of the SELECT (SELECT * and expression columns cannot be used).'],
+  'subquery-predicate': ['WHERE に副問い合わせ（SELECT / EXISTS）を含む SELECT は、ロック対象を確定できないため対象外です。副問い合わせを使わない条件に書き換えてください。', 'A WHERE clause containing a subquery (SELECT / EXISTS) is unsupported because the rows to lock cannot be fixed. Rewrite the condition without a subquery.'],
 };
 for (const [key, values] of Object.entries(backupReasons)) {
   ja[`dml.reason.${key}`] = values[0]; en[`dml.reason.${key}`] = values[1];

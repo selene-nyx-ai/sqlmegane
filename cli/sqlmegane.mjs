@@ -337,6 +337,7 @@ export function parseSubcommand(argv, command) {
       else if (name === '--by-key') out.byKey = take();
       else if (name === '--target-key') out.targetKey = take();
       else if (name === '--backup-table') out.backupTable = take();
+      else if (name === '--oracle-compatible') out.oracleCompatible = take();
       else if (name === '--backup-columns') out.backupColumns = take().split(',').map((s) => s.trim());
       else if (name === '--key-columns') out.keyColumns = take().split(',').map((s) => s.trim());
       else if (name === '--stage') out.stage = take();

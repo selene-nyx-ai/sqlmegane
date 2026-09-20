@@ -14,6 +14,7 @@ const REASON_CODES = new Set([
   'update-columns-not-in-backup', 'key-column-assigned', 'duplicate-column',
   'backup-table-same-as-target', 'backup-name-too-long', 'expression-assignment',
   'lock-method-undefined', 'unfilled-placeholder', 'insert-columns-not-in-backup',
+  'column-not-in-select', 'subquery-predicate',
   'partial-compensation-unsupported', 'assignment-columns-mismatch',
 ]);
 
@@ -701,11 +702,14 @@ function backupSet(sqlText, options) {
   }
   if (/<[A-Za-z_][^>]*>/.test(originalSelect)) add('unfilled-placeholder');
   if (parsed.status !== 'ok') return fail();
+  // Backup / key columns must be direct output columns of the SELECT (SELECT * yields no candidates).
+  const candidates = Array.isArray(parsed.columnCandidates) ? parsed.columnCandidates : [];
+  if (!candidates.length || columns.some((c) => !includes(candidates, c)) || keys.some((k) => !includes(candidates, k))) add('column-not-in-select');
   // Nested queries / qualified multi-part predicates need separate lock analysis.
   const pt = lex(parsed.where);
   const inputTokens = lex(originalSelect);
   if (inputTokens.some((t, i) => t.kind !== 'string' && (['?', '@', '&'].includes(t.text) || (t.text === ':' && inputTokens[i - 1]?.text !== ':' && inputTokens[i + 1]?.text !== ':') || /^\$\d+$/.test(t.text)))) add('unfilled-placeholder');
-  if (pt.some((t) => ['SELECT', 'EXISTS'].includes(t.upper))) add('lock-method-undefined');
+  if (pt.some((t) => ['SELECT', 'EXISTS'].includes(t.upper))) add('subquery-predicate');
   const table = parsed.target.table;
   const backupTable = o.backupTable === undefined ? backupName(table, d, o) : String(o.backupTable).trim();
   if (!backupIdentifier(backupTable, true)) add('unfilled-placeholder');

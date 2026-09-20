@@ -2959,7 +2959,7 @@ for (const [code, sql] of [
   ['cte-unsupported-v1', 'WITH x AS (SELECT id FROM demo) SELECT id FROM x'],
   ['join-unsupported-v1', 'SELECT a.id FROM demo a JOIN other b ON a.id = b.id'],
   ['grouping', 'SELECT COUNT(*) FROM demo'],
-  ['lock-method-undefined', 'SELECT id, value FROM demo WHERE id IN (SELECT id FROM other)'],
+  ['subquery-predicate', 'SELECT id, value FROM demo WHERE id IN (SELECT id FROM other)'],
 ]) test(`backup existing shape: ${code}`, () => assert.ok(buildBackup({}, sql).reasonCodes.includes(code)));
 test('backup postgres locks in INSERT and no trailing rollback', () => {
   assert.match(buildBackup().stages.backup.sql, /INSERT INTO[\s\S]*FOR UPDATE OF t;/);
@@ -2989,7 +2989,7 @@ test('backup supplied name length limits for each dialect', () => {
   }
 });
 test('backup assignments share SET, change check and compensation expected check', () => {
-  const r = buildBackup({ backupColumns: ['id', 'value', 'other'], assignments: [{ column: 'value', value: 'NULL' }, { column: 'other', value: '12' }] });
+  const r = buildBackup({ backupColumns: ['id', 'value', 'other'], assignments: [{ column: 'value', value: 'NULL' }, { column: 'other', value: '12' }] }, "SELECT id, value, other FROM demo WHERE value = 'old';");
   assert.match(r.stages.change.sql, /SET value = NULL, other = 12/);
   for (const sql of [r.stages.change.sql, r.compensation.precheck.sql, r.compensation.apply.sql]) assert.match(sql, /t.value IS DISTINCT FROM NULL OR t.other IS DISTINCT FROM 12/);
 });
@@ -3062,6 +3062,26 @@ test('backup Oracle MERGE keeps expected state outside ON', () => {
 });
 test('backup placeholder in SELECT output blocks A-D', () => {
   assert.equal(buildBackup({}, 'SELECT id, $1 FROM demo').status, 'unsupported');
+});
+// Blind test 2026-09-20: columns must exist in the SELECT output; SELECT * has no candidates.
+test('backup rejects columns that are not direct SELECT output columns', () => {
+  const star = buildBackup({}, "SELECT * FROM demo WHERE value = 'old';");
+  assert.equal(star.status, 'unsupported'); assert.ok(star.reasonCodes.includes('column-not-in-select'));
+  const missing = buildBackup({ backupColumns: ['id', 'value', 'other'] });
+  assert.equal(missing.status, 'unsupported'); assert.ok(missing.reasonCodes.includes('column-not-in-select'));
+  const badKey = buildBackup({ keyColumns: ['nope'], backupColumns: ['id', 'value', 'nope'] });
+  assert.ok(badKey.reasonCodes.includes('column-not-in-select'));
+  assert.equal(buildBackup({}).status, 'ok');
+});
+test('backup subquery predicate has its own reason code', () => {
+  const r = buildBackup({}, "SELECT id, value FROM demo WHERE id IN (SELECT id FROM other);");
+  assert.equal(r.status, 'unsupported'); assert.ok(r.reasonCodes.includes('subquery-predicate'));
+  assert.ok(!r.reasonCodes.includes('lock-method-undefined'));
+});
+test('backup oracle legacy compatible shortens the default name to 30 bytes', () => {
+  const r = buildBackup({ dialect: 'oracle', backupTable: undefined, oracleCompatible: 'legacy' }, "SELECT id, value FROM a_rather_long_table_name_here WHERE value = 'old';");
+  assert.equal(r.status, 'ok'); assert.ok(Buffer.byteLength(r.backupTable) <= 30, r.backupTable);
+  assert.ok(r.backupTable.endsWith('_bk_20260920000000_a123'));
 });
 
 // 結果表示
