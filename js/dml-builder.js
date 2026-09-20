@@ -433,7 +433,9 @@ function convertByKey(sqlText, options) {
   const hint = dialect === 'mysql' ? '/*+ NO_MERGE(sqlmegane_src) */ ' : '';
   if (hint) warnings.push('mysql-no-merge');
   const keyHead = `SELECT ${hint}${outputKey} FROM (`;
-  const predicate = `${targetKey} IN (${keyHead}${body}) sqlmegane_src)`;
+  // If the original SELECT ends with a line comment (e.g. `WHERE x <= 0.2 -- VIP`), close the derived
+  // table on a new line; otherwise `) sqlmegane_src)` would be swallowed by the comment.
+  const predicate = `${targetKey} IN (${keyHead}${body}${endsWithLineComment(body) ? '\n' : ''}) sqlmegane_src)`;
   const bodies = {
     update: `UPDATE ${targetTable} SET <column> = <value> WHERE ${predicate};`,
     delete: `DELETE FROM ${targetTable} WHERE ${predicate};`,
@@ -603,9 +605,11 @@ function convert(sqlText, options) {
     ? `DELETE ${target.alias} FROM ${target.table} AS ${target.alias}`
     : `DELETE FROM ${target.table}${deleteAlias}`;
   const suffix = whereClause ? ` ${whereClause}` : '';
-  const update = `UPDATE ${updateTarget} SET <column> = <value>${suffix};`;
-  const del = `${deleteHead}${suffix};`;
-  const countSelect = `SELECT COUNT(*) FROM ${target.table}${selectAlias}${suffix};`;
+  // A WHERE that ends with a line comment would swallow the terminator; put `;` on its own line then.
+  const terminator = endsWithLineComment(suffix) ? '\n;' : ';';
+  const update = `UPDATE ${updateTarget} SET <column> = <value>${suffix}${terminator}`;
+  const del = `${deleteHead}${suffix}${terminator}`;
+  const countSelect = `SELECT COUNT(*) FROM ${target.table}${selectAlias}${suffix}${terminator}`;
   const generated = [update, del, countSelect];
   // 生成物から元の WHERE を除いた部分（DML の頭部）を取り出し、対象表が一度だけ現れ、
   // 他の識別子（別の表）が行ソースに紛れ込んでいないことを実際に数えて確認する。
@@ -808,6 +812,12 @@ function hasAlternativeQuote(sql) {
     i++;
   }
   return false;
+}
+// True when the last line of `text` carries a line comment (-- or #) outside string literals / quoted identifiers.
+function endsWithLineComment(text) {
+  const last = String(text || '').trimEnd().split('\n').pop() || '';
+  const stripped = last.replace(/'(?:[^']|'')*'|"(?:[^"]|"")*"|`(?:[^`]|``)*`|\[(?:[^\]]|\]\])*\]/g, '');
+  return /--|#/.test(stripped);
 }
 function backupMessage(key, locale) {
   return globalThis.SQLMeganeI18n.messages[locale === 'en' ? 'en' : 'ja'][`dml.backup.${key}`];

@@ -3119,6 +3119,22 @@ test('backup rejects Oracle q-quoted strings and bare whole-row alias references
   const dollar = buildBackup({}, 'SELECT d.id, d.value FROM demo d WHERE d.value = $$-- d.id$$');
   assert.equal(dollar.status, 'ok'); assert.match(dollar.stages.backup.sql, /t\.value = \$\$-- d\.id\$\$\nFOR UPDATE OF t;/);
 });
+// 2026-09-20 real-browser trial: a SELECT whose last line ends with a comment swallowed `) sqlmegane_src)` / `;`.
+test('trailing line comment in the original SELECT does not swallow generated closing text', () => {
+  const sql = 'WITH cs AS (SELECT user_id FROM orders WHERE total > 1)\nSELECT u.user_id FROM cs JOIN users u ON u.user_id = cs.user_id\nWHERE cs.user_id > 0 -- VIP\nORDER BY u.user_id;';
+  const byKey = DmlBuilder.convertByKey(sql, { dialect: 'postgres', targetTable: 'orders', outputKey: 'user_id' });
+  assert.equal(byKey.status, 'ok');
+  for (const s of [byKey.delete, byKey.update, byKey.countSelect]) assert.match(s, /-- VIP\n\) sqlmegane_src\);$/);
+  const single = DmlBuilder.convert('SELECT id FROM t_log WHERE id = 1 -- VIP', { dialect: 'postgres' });
+  assert.equal(single.status, 'ok');
+  for (const s of [single.delete, single.update, single.countSelect]) assert.match(s, /-- VIP\n;$/);
+  // A `--` inside a string literal on the last line is not a comment; keep the terminator on the same line.
+  const literal = DmlBuilder.convert("SELECT id FROM t_log WHERE note = 'a -- b'", { dialect: 'postgres' });
+  assert.match(literal.delete, /'a -- b';$/);
+  // Backup stage A reuses the single-table count SELECT, so it must also terminate correctly.
+  const backup = buildBackup({}, "SELECT id, value FROM demo WHERE value = 'old' AND id > 0");
+  assert.equal(backup.status, 'ok'); assert.match(backup.stages.precheck.sql, /AND id > 0;\n/);
+});
 // Publish review round 3 (Codex): arrays hide alias references; SQL Server "x" anywhere; q-quote false positives.
 test('backup rejects PostgreSQL array syntax and SQL Server double-quoted identifiers in the SELECT', () => {
   for (const sql of ['SELECT d.id, d.value FROM demo d WHERE array_to_json(ARRAY[d,d]) IS NOT NULL', 'SELECT d.id, d.value FROM demo d WHERE d.id = ANY(ARRAY[d.id])']) {
