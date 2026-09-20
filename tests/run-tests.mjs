@@ -3151,8 +3151,15 @@ test('trailing line comment in the original SELECT does not swallow generated cl
   assert.match(myEscapeKey.delete, /-- VIP\n\) sqlmegane_src\);$/);
   const nested = DmlBuilder.convert("SELECT id FROM demo WHERE id = 1 /* outer /* inner */ ' */ -- VIP", { dialect: 'postgres' });
   assert.match(nested.delete, /-- VIP\n;$/);
-  // Non-PostgreSQL block comments end at the first */ (the rest is not a comment).
+  // MySQL / Oracle block comments end at the first */ (the rest is not a comment).
   assert.match(DmlBuilder.convert("SELECT id FROM demo WHERE id = 1 /* a /* b */ AND id = 1", { dialect: 'mysql' }).delete, /AND id = 1;$/);
+  // Codex review round 3: `$$` inside identifiers, PostgreSQL E'…' escape strings, SQL Server nested comments.
+  const doubleDollar = DmlBuilder.convertByKey('SELECT id FROM demo WHERE code$$tag$ = 1 -- VIP', { dialect: 'postgres', targetTable: 'demo', outputKey: 'id' });
+  assert.match(doubleDollar.delete, /-- VIP\n\) sqlmegane_src\);$/);
+  const escapeString = DmlBuilder.convertByKey("SELECT id FROM demo WHERE note = E'a\\'b' -- VIP", { dialect: 'postgres', targetTable: 'demo', outputKey: 'id' });
+  assert.match(escapeString.delete, /-- VIP\n\) sqlmegane_src\);$/);
+  const mssqlNested = DmlBuilder.convertByKey("SELECT id FROM demo WHERE id = 1 /* outer /* inner */ ' */ -- VIP", { dialect: 'mssql', targetTable: 'demo', outputKey: 'id' });
+  assert.match(mssqlNested.delete, /-- VIP\n\) sqlmegane_src\);$/);
   // Backup stage A reuses the single-table count SELECT, so it must also terminate correctly.
   const backup = buildBackup({}, "SELECT id, value FROM demo WHERE value = 'old' AND id > 0");
   assert.equal(backup.status, 'ok'); assert.match(backup.stages.precheck.sql, /AND id > 0;\n/);
