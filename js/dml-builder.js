@@ -714,9 +714,12 @@ function backupSet(sqlText, options) {
   // Alias rewriting (below) is only safe without backslash escapes (MySQL string syntax) and without comments,
   // which would swallow the generated lock clause / statement terminator.
   const rawPredicate = parsed.where || '';
-  const outsideLiterals = rawPredicate.replace(/\$([A-Za-z_0-9]*)\$[\s\S]*?\$\1\$|'(?:[^']|'')*'|"(?:[^"]|"")*"|`(?:[^`]|``)*`|\[(?:[^\]]|\]\])*\]/g, '');
-  // Oracle alternative quoting q'…' / nq'…' is not understood by lex(), so its contents could be rewritten: reject.
-  if (/\\/.test(rawPredicate) || /--|\/\*/.test(outsideLiterals) || (d === 'mysql' && /#/.test(outsideLiterals)) || /(^|[^A-Za-z0-9_$#"`\]])[nN]?[qQ]'/.test(rawPredicate)) add('predicate-unsupported');
+  const outsideStrings = rawPredicate.replace(/\$([A-Za-z_0-9]*)\$[\s\S]*?\$\1\$|'(?:[^']|'')*'|"(?:[^"]|"")*"|`(?:[^`]|``)*`/g, '');
+  const outsideLiterals = d === 'mssql' ? outsideStrings.replace(/\[(?:[^\]]|\]\])*\]/g, '') : outsideStrings;
+  // lex() treats [...] as a quoted identifier; outside SQL Server that is array syntax (PostgreSQL) whose contents would not be rewritten: reject.
+  if (/\\/.test(rawPredicate) || /--|\/\*/.test(outsideLiterals) || (d === 'mysql' && /#/.test(outsideLiterals)) || (d !== 'mssql' && /\[/.test(outsideStrings)) || hasAlternativeQuote(rawPredicate)) add('predicate-unsupported');
+  // Quoted identifiers anywhere in the original SELECT must use the dialect's own style (e.g. no "x" for SQL Server, no `x` for PostgreSQL).
+  if (lex(originalSelect).some((tk) => tk.kind === 'identifier' && !backupIdentifier(tk.text, false, d))) add('unfilled-placeholder');
   const table = parsed.target.table;
   const backupTable = o.backupTable === undefined ? backupName(table, d, o) : String(o.backupTable).trim();
   if (!backupIdentifier(backupTable, true, d)) add('unfilled-placeholder');
@@ -781,6 +784,31 @@ function backupSet(sqlText, options) {
     compensation, warnings: [globalThis.SQLMeganeI18n.messages[o.locale === 'en' ? 'en' : 'ja']['dml.warning.key-uniqueness'], T('scope'), T('countNotice')], originalSelect };
 }
 
+// Oracle alternative quoting (q'…' / nq'…') is not understood by lex(); detect its start outside ordinary strings,
+// dollar-quoted strings and quoted identifiers so that 'q''abc' or $$ q'abc $$ are not rejected.
+function hasAlternativeQuote(sql) {
+  let i = 0;
+  while (i < sql.length) {
+    const c = sql[i];
+    if (c === "'") {
+      const prev = sql.slice(Math.max(0, i - 2), i);
+      if (/(^|[^A-Za-z0-9_$#])[qQ]$/.test(prev) || /(^|[^A-Za-z0-9_$#])[nN][qQ]$/.test(sql.slice(Math.max(0, i - 3), i))) return true;
+      i++; while (i < sql.length) { if (sql[i] === "'" && sql[i + 1] === "'") { i += 2; continue; } if (sql[i++] === "'") break; }
+      continue;
+    }
+    if (c === '$') {
+      const m = sql.slice(i).match(/^\$[A-Za-z_0-9]*\$/);
+      if (m) { const close = sql.indexOf(m[0], i + m[0].length); i = close < 0 ? sql.length : close + m[0].length; continue; }
+    }
+    if (c === '"' || c === '`' || c === '[') {
+      const close = c === '[' ? ']' : c; i++;
+      while (i < sql.length) { if (sql[i] === close && sql[i + 1] === close) { i += 2; continue; } if (sql[i++] === close) break; }
+      continue;
+    }
+    i++;
+  }
+  return false;
+}
 function backupMessage(key, locale) {
   return globalThis.SQLMeganeI18n.messages[locale === 'en' ? 'en' : 'ja'][`dml.backup.${key}`];
 }

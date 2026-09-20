@@ -3119,6 +3119,23 @@ test('backup rejects Oracle q-quoted strings and bare whole-row alias references
   const dollar = buildBackup({}, 'SELECT d.id, d.value FROM demo d WHERE d.value = $$-- d.id$$');
   assert.equal(dollar.status, 'ok'); assert.match(dollar.stages.backup.sql, /t\.value = \$\$-- d\.id\$\$\nFOR UPDATE OF t;/);
 });
+// Publish review round 3 (Codex): arrays hide alias references; SQL Server "x" anywhere; q-quote false positives.
+test('backup rejects PostgreSQL array syntax and SQL Server double-quoted identifiers in the SELECT', () => {
+  for (const sql of ['SELECT d.id, d.value FROM demo d WHERE array_to_json(ARRAY[d,d]) IS NOT NULL', 'SELECT d.id, d.value FROM demo d WHERE d.id = ANY(ARRAY[d.id])']) {
+    const r = buildBackup({}, sql);
+    assert.equal(r.status, 'unsupported', sql); assert.ok(r.reasonCodes.includes('predicate-unsupported'));
+  }
+  for (const sql of ['SELECT d.id, d.value FROM "demo" d WHERE d.id = 1', 'SELECT d.id, d.value FROM demo d WHERE "value" = \'old\'']) {
+    const r = buildBackup({ dialect: 'mssql', backupTable: 'demo_bk' }, sql);
+    assert.equal(r.status, 'unsupported', sql); assert.ok(r.reasonCodes.includes('unfilled-placeholder'));
+  }
+  assert.equal(buildBackup({ dialect: 'mssql', backupTable: 'demo_bk' }, 'SELECT d.id, d.value FROM [demo] d WHERE d.id = 1').status, 'ok');
+  assert.equal(buildBackup({ dialect: 'postgres' }, 'SELECT d.id, d.value FROM `demo` d WHERE d.id = 1').status, 'unsupported');
+  // Ordinary strings that merely contain q' are fine.
+  assert.equal(buildBackup({}, "SELECT d.id, d.value FROM demo d WHERE d.value = 'q''abc'").status, 'ok');
+  assert.equal(buildBackup({}, "SELECT d.id, d.value FROM demo d WHERE d.value = $$ q'abc $$").status, 'ok');
+  assert.equal(buildBackup({ dialect: 'oracle' }, "SELECT d.id, d.value FROM demo d WHERE d.value = 'x' AND d.id = q'[1]'").status, 'unsupported');
+});
 test('backup duplicate detection respects quoted-identifier case per dialect', () => {
   const pg = buildBackup({ backupColumns: ['"id"', '"ID"', 'value'] }, 'SELECT "id", "ID", value FROM demo WHERE value = \'old\';');
   assert.ok(!pg.reasonCodes.includes('duplicate-column'));
