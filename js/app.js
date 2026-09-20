@@ -1097,20 +1097,27 @@ for (const kind of TEMPLATE_KINDS) {
 els.templateCopy.addEventListener('click', () => copyToClipboard(els.templateSql.textContent, els.templateCopy));
 // 記事などから「この SQL で試す」リンクで直接結果まで飛べるようにする（#sql=<encodeURIComponent した SQL>&dialect=<方言>）。
 // URL のハッシュ部分はサーバーに送られないので、SQL を外部に出さない方針と両立する。値はテキストとして textarea に入れるだけ。
+// 初回表示でだけ適用する（hashchange で再適用すると、編集中の SQL が結果内リンクや「戻る」で消えるため）。
+const HASH_SQL_MAX = 20000;
 function applyHashSql() {
   const hash = (globalThis.location && globalThis.location.hash || '').replace(/^#/, '');
   if (!hash) return false;
   const params = new URLSearchParams(hash);
   const sql = params.get('sql');
   if (sql === null) return false;
+  if (sql.length > HASH_SQL_MAX) {
+    // 切り詰めず、貼り付けを案内する（長い SQL はリンク向きではない）
+    els.input.parentNode.insertBefore(el('p', { className: 'conversion-warning', text: t('ui.hashTooLong', { max: HASH_SQL_MAX }) }), els.input);
+    return false;
+  }
+  // 方言は省略・不正値なら auto に固定し、前の選択を引き継がない（同じリンクは同じ結果になる）
   const dialect = params.get('dialect');
-  if (dialect && [...els.dialect.options].some((o) => o.value === dialect)) els.dialect.value = dialect;
+  els.dialect.value = dialect && [...els.dialect.options].some((o) => o.value === dialect) ? dialect : 'auto';
   els.input.value = sql;
   showDmlBuilder = false;
   refreshControls();
   return true;
 }
-globalThis.addEventListener('hashchange', () => { if (applyHashSql()) render(); });
 refreshControls();
 applyHashSql();
 // 初期表示

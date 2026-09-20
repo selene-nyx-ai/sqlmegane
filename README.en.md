@@ -21,7 +21,7 @@ SQL analysis makes no network requests and stays in the browser. The app has no 
 
 ### Links with SQL (“try this SQL” from an article)
 
-Open `https://selene-nyx-ai.github.io/sqlmegane/en/#sql=<encodeURIComponent(SQL)>&dialect=<auto|generic|mysql|postgres|mssql|oracle>` and the SQL is loaded into the input with the result shown. The fragment after `#` is never sent to the server, so the SQL does not appear in GitHub Pages access logs either. Example: [try `DELETE FROM t_log;`](https://selene-nyx-ai.github.io/sqlmegane/en/#sql=DELETE%20FROM%20t_log%3B&dialect=mysql)
+Open `https://selene-nyx-ai.github.io/sqlmegane/en/#sql=<encodeURIComponent(SQL)>&dialect=<auto|generic|mysql|postgres|mssql|oracle>` and the SQL is loaded into the input with the result shown. The fragment after `#` is never sent to the server, so the SQL does not appear in GitHub Pages access logs either. The link is applied on first load only; an omitted or invalid dialect falls back to `auto`. Encode the whole SQL with `encodeURIComponent` (a raw `+` or `&` changes the meaning). Intended for short samples: SQL over 20,000 characters is not loaded and you are asked to paste it. **Note**: nothing is sent to the server, but the SQL is part of the URL. It can remain in browser history, bookmarks and sync, and sharing the URL shares the SQL; passing it to a URL shortener or link tracker hands it to that service. Use it only for samples you are happy to publish, never for credentials, personal data or confidential SQL. Example: [try `DELETE FROM t_log;`](https://selene-nyx-ai.github.io/sqlmegane/en/#sql=DELETE%20FROM%20t_log%3B&dialect=mysql)
 
 Example. Paste `DELETE FROM t_log;` with the MySQL dialect and you get:
 

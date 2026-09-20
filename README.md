@@ -30,7 +30,7 @@ v2 から、MySQL / PostgreSQL / SQL Server については本物のSQLパーサ
 
 ### SQL 付きリンク（記事などから「この SQL で試す」）
 
-`https://selene-nyx-ai.github.io/sqlmegane/#sql=<encodeURIComponent した SQL>&dialect=<auto|generic|mysql|postgres|mssql|oracle>` の形のリンクを開くと、SQL が入力欄に入った状態で結果まで表示します。`#` 以降（フラグメント）はブラウザがサーバーへ送らないため、SQL は GitHub Pages のアクセスログにも残りません。英語 UI は `/en/#sql=...`。例: [`DELETE FROM t_log;` を試す](https://selene-nyx-ai.github.io/sqlmegane/#sql=DELETE%20FROM%20t_log%3B&dialect=mysql)
+`https://selene-nyx-ai.github.io/sqlmegane/#sql=<encodeURIComponent した SQL>&dialect=<auto|generic|mysql|postgres|mssql|oracle>` の形のリンクを開くと、SQL が入力欄に入った状態で結果まで表示します。`#` 以降（フラグメント）はブラウザがサーバーへ送らないため、SQL は GitHub Pages のアクセスログにも残りません。英語 UI は `/en/#sql=...`。リンクは初回表示でだけ適用し、方言を省略した場合や不正な値は `auto` になります。SQL 全体を `encodeURIComponent` でエンコードしてください（`+` や `&` をそのまま書くと別の意味になります）。短いサンプル向けで、20,000 文字を超える SQL は読み込まず貼り付けを案内します。**注意**: サーバーには送られませんが、URL 自体に SQL が入ります。ブラウザの履歴・ブックマーク・同期先に残ることがあり、URL を共有すれば SQL も共有されます。短縮 URL やリンク追跡サービスに渡せば、そのサービスへの提供になります。公開してよいサンプルにだけ使い、認証情報・個人情報・機密の SQL を含めないでください。例: [`DELETE FROM t_log;` を試す](https://selene-nyx-ai.github.io/sqlmegane/#sql=DELETE%20FROM%20t_log%3B&dialect=mysql)
 
 ### CLI（CI や実行前フック向け）
 
