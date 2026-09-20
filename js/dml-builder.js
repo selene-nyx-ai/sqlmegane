@@ -714,8 +714,9 @@ function backupSet(sqlText, options) {
   // Alias rewriting (below) is only safe without backslash escapes (MySQL string syntax) and without comments,
   // which would swallow the generated lock clause / statement terminator.
   const rawPredicate = parsed.where || '';
-  const outsideLiterals = rawPredicate.replace(/'(?:[^']|'')*'|"(?:[^"]|"")*"|`(?:[^`]|``)*`|\[(?:[^\]]|\]\])*\]/g, '');
-  if (/\\/.test(rawPredicate) || /--|\/\*/.test(outsideLiterals) || (d === 'mysql' && /#/.test(outsideLiterals))) add('predicate-unsupported');
+  const outsideLiterals = rawPredicate.replace(/\$([A-Za-z_0-9]*)\$[\s\S]*?\$\1\$|'(?:[^']|'')*'|"(?:[^"]|"")*"|`(?:[^`]|``)*`|\[(?:[^\]]|\]\])*\]/g, '');
+  // Oracle alternative quoting q'…' / nq'…' is not understood by lex(), so its contents could be rewritten: reject.
+  if (/\\/.test(rawPredicate) || /--|\/\*/.test(outsideLiterals) || (d === 'mysql' && /#/.test(outsideLiterals)) || /(^|[^A-Za-z0-9_$#"`\]])[nN]?[qQ]'/.test(rawPredicate)) add('predicate-unsupported');
   const table = parsed.target.table;
   const backupTable = o.backupTable === undefined ? backupName(table, d, o) : String(o.backupTable).trim();
   if (!backupIdentifier(backupTable, true, d)) add('unfilled-placeholder');
@@ -727,6 +728,10 @@ function backupSet(sqlText, options) {
   if (reasons.length) return fail();
   let predicate = parsed.where.replace(/^WHERE\s+/i, '') || '1 = 1';
   const qualifier = parsed.target.alias || lex(table).filter(isIdentifier).at(-1).text;
+  // A bare alias (not followed by '.') is a whole-row reference such as row_to_json(d); it would be left dangling after rewriting.
+  const wanted = normalizeIdentifier(qualifier);
+  const bare = lex(predicate).some((tk, i, ts) => isIdentifier(tk) && normalizeIdentifier(tk.text) === wanted && (!ts[i + 1] || ts[i + 1].text !== '.') && (!ts[i - 1] || ts[i - 1].text !== '.'));
+  if (bare) { add('predicate-unsupported'); return fail(); }
   predicate = replaceAlias(predicate, qualifier, 't');
   const rt = lex(predicate);
   if (rt.some((tk, i) => tk.text === '.' && rt[i + 2] && rt[i + 2].text === '.')) { add('lock-method-undefined'); return fail(); }
@@ -781,12 +786,19 @@ function backupMessage(key, locale) {
 }
 function backupIdentifier(value, qualified, dialect) {
   if (typeof value !== 'string' || !value.trim()) return false;
-  // Quoting style per dialect: PostgreSQL / Oracle "x", MySQL `x` (ANSI_QUOTES is setting-dependent, so "x" is rejected), SQL Server [x] or "x".
+  // Quoting style per dialect: PostgreSQL / Oracle "x", MySQL `x` (ANSI_QUOTES is setting-dependent, so "x" is rejected),
+  // SQL Server [x] only ("x" depends on QUOTED_IDENTIFIER, which the generated SQL does not set).
   const quoted = dialect === 'mysql' ? '`(?:[^`]|``)+`'
-    : dialect === 'mssql' ? '"(?:[^"]|"")+"|\\[(?:[^\\]]|\\]\\])+\\]'
+    : dialect === 'mssql' ? '\\[(?:[^\\]]|\\]\\])+\\]'
     : ['postgres', 'oracle'].includes(dialect) ? '"(?:[^"]|"")+"'
     : '"(?:[^"]|"")+"|`(?:[^`]|``)+`|\\[(?:[^\\]]|\\]\\])+\\]';
-  const ident = `(?:[A-Za-z_\\u0080-\\uFFFF][A-Za-z0-9_$#\\u0080-\\uFFFF]*|${quoted})`;
+  // Unquoted identifier rules per dialect (conservative: anything else must be quoted).
+  const unquoted = dialect === 'oracle' ? '[A-Za-z][A-Za-z0-9_$#]*'
+    : dialect === 'postgres' ? '[A-Za-z_\\u0080-\\uFFFF][A-Za-z0-9_$\\u0080-\\uFFFF]*'
+    : dialect === 'mysql' ? '[A-Za-z_\\u0080-\\uFFFF][A-Za-z0-9_$\\u0080-\\uFFFF]*'
+    : dialect === 'mssql' ? '[A-Za-z_\\u0080-\\uFFFF][A-Za-z0-9_$#\\u0080-\\uFFFF]*'
+    : '[A-Za-z_\\u0080-\\uFFFF][A-Za-z0-9_$#\\u0080-\\uFFFF]*';
+  const ident = `(?:${unquoted}|${quoted})`;
   return new RegExp(`^${ident}${qualified ? `(?:\\s*\\.\\s*${ident})*` : ''}$`).test(value) && !/[\r\n]/.test(value);
 }
 function backupLength(s, dialect) { return ['postgres', 'oracle'].includes(dialect) ? new TextEncoder().encode(s).length : [...s].length; }

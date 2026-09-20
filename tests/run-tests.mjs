@@ -3098,6 +3098,26 @@ test('backup identifier quoting follows the dialect', () => {
   assert.equal(buildBackup({ dialect: 'mysql', backupTable: '`demo_bk`' }).status, 'ok');
   assert.equal(buildBackup({ dialect: 'mysql', backupTable: '"demo_bk"' }).status, 'unsupported');
   assert.equal(buildBackup({ dialect: 'mssql', backupTable: '[demo_bk]' }).status, 'ok');
+  // QUOTED_IDENTIFIER is not set by the generated SQL, so "x" is not accepted for SQL Server.
+  assert.equal(buildBackup({ dialect: 'mssql', backupTable: '"demo_bk"' }).status, 'unsupported');
+  // Unquoted identifier rules per dialect.
+  assert.equal(buildBackup({ dialect: 'oracle', backupTable: '_demo_bk' }).status, 'unsupported');
+  assert.equal(buildBackup({ dialect: 'oracle', backupTable: 'demo_bk#1' }).status, 'ok');
+  assert.equal(buildBackup({ backupTable: 'demo#bk' }).status, 'unsupported');
+});
+// Publish review round 2 (Codex): Oracle alternative quoting and whole-row alias references.
+test('backup rejects Oracle q-quoted strings and bare whole-row alias references', () => {
+  for (const sql of ["SELECT d.id, d.value FROM demo d WHERE d.value = q'[it's d.id]'", "SELECT d.id, d.value FROM demo d WHERE d.value = nq'[it's d.id]'", "SELECT d.id, d.value FROM demo d WHERE d.value = Q'{x}'"]) {
+    const r = buildBackup({ dialect: 'oracle' }, sql);
+    assert.equal(r.status, 'unsupported', sql); assert.ok(r.reasonCodes.includes('predicate-unsupported'));
+  }
+  const row = buildBackup({}, 'SELECT d.id, d.value FROM demo d WHERE row_to_json(d) IS NOT NULL');
+  assert.equal(row.status, 'unsupported'); assert.ok(row.reasonCodes.includes('predicate-unsupported'));
+  // A column that merely contains the alias text (d_flag, seq_d) is not a bare alias.
+  assert.equal(buildBackup({}, "SELECT d.id, d.value FROM demo d WHERE d.value = 'old' AND d_flag = 1").status, 'ok');
+  // Dollar-quoted strings are literals, not comments.
+  const dollar = buildBackup({}, 'SELECT d.id, d.value FROM demo d WHERE d.value = $$-- d.id$$');
+  assert.equal(dollar.status, 'ok'); assert.match(dollar.stages.backup.sql, /t\.value = \$\$-- d\.id\$\$\nFOR UPDATE OF t;/);
 });
 test('backup duplicate detection respects quoted-identifier case per dialect', () => {
   const pg = buildBackup({ backupColumns: ['"id"', '"ID"', 'value'] }, 'SELECT "id", "ID", value FROM demo WHERE value = \'old\';');

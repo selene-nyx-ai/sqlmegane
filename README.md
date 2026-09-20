@@ -121,7 +121,7 @@ MySQL / PostgreSQL / SQL Server では、同梱パーサで生成文を再解析
 | SQL Server | reference：公式ドキュメントに基づく参考型紙・実機未検証 | `UPDLOCK, HOLDLOCK`。範囲保護、ロック拡大の可能性 |
 | Oracle 19c 以降 | reference：公式ドキュメントに基づく参考型紙・実機未検証 | `LOCK TABLE ... IN EXCLUSIVE MODE`。表全体の書き込みを待機させる（通常 SELECT は可、FOR UPDATE は待機） |
 
-退避は **1 作業 1 新規退避表、開始時に空、追記・再利用禁止**。既定名は `<表名>_bk_<UTC の yyyymmddhhmmss>_<4文字>`。スキーマと引用を保ち、名前の表名部分だけを長さ制限に合わせ短縮します。一意性の保証はありません。同名表があれば空でも使わず作業 ID を変更してください。PostgreSQL は 63 バイト、MySQL は 64 文字、SQL Server は 128 文字、Oracle は `COMPATIBLE >= 12.2` で 128 バイト（それ未満は 30 バイト）です。API の `oracleCompatible: 'legacy'`、CLI の `--oracle-compatible legacy` で 30 バイトを指定できます。退避列・キー列は元の SELECT に直接書かれた出力列に限ります（`SELECT *` や式の列は `column-not-in-select` で拒否）。WHERE に副問い合わせを含む SELECT は `subquery-predicate` で拒否します。
+退避は **1 作業 1 新規退避表、開始時に空、追記・再利用禁止**。既定名は `<表名>_bk_<UTC の yyyymmddhhmmss>_<4文字>`。スキーマと引用を保ち、名前の表名部分だけを長さ制限に合わせ短縮します。一意性の保証はありません。同名表があれば空でも使わず作業 ID を変更してください。PostgreSQL は 63 バイト、MySQL は 64 文字、SQL Server は 128 文字、Oracle は `COMPATIBLE >= 12.2` で 128 バイト（それ未満は 30 バイト）です。API の `oracleCompatible: 'legacy'`、CLI の `--oracle-compatible legacy` で 30 バイトを指定できます。退避列・キー列は元の SELECT に直接書かれた出力列に限ります（`SELECT *` や式の列は `column-not-in-select` で拒否）。WHERE に副問い合わせを含む SELECT は `subquery-predicate` で拒否します。WHERE にバックスラッシュ・コメント・Oracle の `q'…'` 代替引用・別名で修飾した関数呼び出し・別名を裸で使う行参照（`row_to_json(d)` など）がある SELECT は、別名の付け替えを安全にできないため `predicate-unsupported` で拒否します。引用識別子は方言の方式に限ります（PostgreSQL / Oracle は `"x"`、MySQL は `` `x` ``、SQL Server は `[x]` のみ。`"x"` は QUOTED_IDENTIFIER に依存するため受け付けません）。
 
 空表作成は属性を完全に複製しません。
 
