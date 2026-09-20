@@ -845,6 +845,70 @@ function appendConvertedStages(card, converted, dialect) {
   return card;
 }
 
+function appendBackupSet(card, sql, dialect, converted) {
+  const section = el('details', { className: 'conversion-step backup-set' });
+  section.appendChild(el('summary', { className: 'conversion-head', text: t('dml.backup.title') }));
+  const form = el('div', { className: 'backup-inputs' });
+  const field = (label, input) => { const row = el('label', { className: 'backup-field' }); row.appendChild(el('span', { text: label })); row.appendChild(input); form.appendChild(row); return input; };
+  const backupTable = field(t('dml.backup.backupTable'), el('input', { attrs: { type: 'text' } }));
+  backupTable.value = DmlBuilder.backupName(converted.target.table, dialect);
+  const operation = field(t('ui.safeDml'), el('select'));
+  for (const name of ['delete', 'update']) operation.appendChild(el('option', { text: name.toUpperCase(), attrs: { value: name } }));
+  const selected = { backupColumns: [], keyColumns: [] };
+  for (const kind of ['backupColumns', 'keyColumns']) {
+    const group = el('fieldset'); group.appendChild(el('legend', { text: t(`dml.backup.${kind}`) }));
+    for (const column of converted.columnCandidates) {
+      const label = el('label', { className: 'backup-choice' });
+      const input = el('input', { attrs: { type: 'checkbox' } });
+      input.addEventListener('change', () => { selected[kind] = [...group.querySelectorAll('input')].filter((x) => x.checked).map((x) => x.value); draw(); });
+      input.value = column; label.appendChild(input); label.appendChild(el('span', { text: column })); group.appendChild(label);
+    }
+    form.appendChild(group);
+  }
+  const assignments = el('fieldset'); assignments.appendChild(el('legend', { text: t('dml.backup.assignments') }));
+  const assignmentInputs = [];
+  for (const column of converted.columnCandidates) {
+    const row = el('label', { className: 'backup-choice' }), chosen = el('input', { attrs: { type: 'checkbox' } }), value = el('input', { attrs: { type: 'text', 'aria-label': `${column} =` } });
+    row.appendChild(chosen); row.appendChild(el('span', { text: `${column} =` })); row.appendChild(value); assignments.appendChild(row);
+    assignmentInputs.push({ column, chosen, value }); chosen.addEventListener('change', draw); value.addEventListener('input', draw);
+  }
+  form.appendChild(assignments); section.appendChild(form);
+  const output = el('div'); section.appendChild(output); card.appendChild(section);
+  function draw() {
+    assignments.hidden = operation.value !== 'update'; output.replaceChildren();
+    output.appendChild(el('p', { className: 'conversion-warning', text: t(`dml.backup.${dialect === 'postgres' ? 'planned' : 'reference'}`) }));
+    const r = DmlBuilder.backupSet(sql, { dialect, shape: 'single', backupTable: backupTable.value, ...selected, to: operation.value, assignments: operation.value === 'update' ? assignmentInputs.filter((x) => x.chosen.checked).map((x) => ({ column: x.column, value: x.value.value })) : [], locale: I18n.getLocale() });
+    if (r.status !== 'ok') {
+      for (const reason of r.reasonCodes) output.appendChild(el('p', { className: 'conversion-error', text: `[${reason}] ${t(`dml.reason.${reason}`)}` }));
+      output.appendChild(sqlCopyBlock(t('dml.backup.title'), '', false)); return;
+    }
+    for (const warning of r.warnings) output.appendChild(el('p', { className: 'hint', text: warning }));
+    const append = (parent, stage, commit) => {
+      const condition = el('p', { className: 'hint', text: `${stage.passCondition} ${stage.onFail}` });
+      const block = foldedSqlBlock(stage.title, () => stage.sql, true, condition);
+      // The conditions stay visible without opening the SQL body.
+      block.wrap.insertBefore(condition, block.pre);
+      block.wrap.querySelector('summary').appendChild(el('span', { className: 'backup-condition', text: `${stage.passCondition} ${stage.onFail}` }));
+      if (commit) block.wrap.querySelector('button').textContent = t('dml.backup.copyCommit');
+      block.wrap.querySelector('button').addEventListener('click', () => block.wrap.scrollIntoView({ behavior: 'smooth', block: 'nearest' }));
+      parent.appendChild(block.wrap);
+    };
+    for (const name of ['prepare', 'precheck', 'backup', 'change']) append(output, r.stages[name]);
+    const finish = (parent, stages) => {
+      append(parent, stages.rollback);
+      const commit = el('details', { className: 'conversion-step' }); commit.appendChild(el('summary', { className: 'conversion-head', text: t('dml.backup.confirmCommit') }));
+      append(commit, stages.commit, true); parent.appendChild(commit);
+    };
+    finish(output, r.stages.finish);
+    const comp = el('details', { className: 'conversion-step' }); comp.appendChild(el('summary', { className: 'conversion-head', text: t('dml.backup.compensation') }));
+    comp.appendChild(el('p', { className: 'conversion-warning', text: t('dml.backup.identity') }));
+    append(comp, r.compensation.precheck); append(comp, r.compensation.apply); finish(comp, r.compensation.finish); output.appendChild(comp);
+  }
+  backupTable.addEventListener('input', draw); operation.addEventListener('change', draw);
+  section.addEventListener('toggle', () => { if (section.open) section.scrollIntoView({ behavior: 'smooth', block: 'nearest' }); });
+  draw();
+}
+
 function renderDmlBuilder(sql, dialect) {
   const converted = DmlBuilder.convert(sql, { dialect, oracleVersion: els.oracleVersion.value });
   const inspection = DmlBuilder.inspect(sql, { dialect });
@@ -853,6 +917,7 @@ function renderDmlBuilder(sql, dialect) {
   const byKeyAvailable = inspection.status === 'ok' && (converted.status !== 'ok' || inspection.tables.length > 1);
   if (converted.status === 'ok') {
     appendConvertedStages(card, converted, dialect);
+    appendBackupSet(card, sql, dialect, converted);
     if (byKeyAvailable) appendByKeyChooser(card, sql, dialect, inspection);
     return card;
   }
@@ -977,7 +1042,7 @@ els.clearBtn.addEventListener('click', () => {
   render();
   els.input.focus();
 });
-const TEMPLATE_KINDS = ['update', 'delete', 'insert-select', 'upsert', 'merge', 'create-table', 'safe-block'];
+const TEMPLATE_KINDS = ['update', 'delete', 'insert-select', 'upsert', 'merge', 'create-table', 'safe-block', 'backup-table', 'compensate-update', 'compensate-delete'];
 for (const kind of TEMPLATE_KINDS) {
   const button = el('button', { className: 'btn btn-ghost', text: t(`ui.template.${kind}`), attrs: { type: 'button' } });
   button.addEventListener('click', () => {

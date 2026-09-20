@@ -79,6 +79,52 @@ For MySQL, PostgreSQL, and SQL Server, the bundled parser re-parses the generate
 
 Always read the generated SQL before using it. The candidate count SELECT is an estimate of matching rows, not the affected-row count. A DELETE built from an aliased SELECT uses MySQL 8.0.16+ syntax (`DELETE FROM t AS a`); drop the alias on older MySQL. The CLI `convert` command prints danger and warning findings from the self-check to stderr (for example, DML built from a SELECT without WHERE).
 
+## Back up before changing (backup → change → compensation)
+
+Open the collapsed **Back up before changing** section below the SELECT converter. Specify a new backup table, explicitly select backup and key columns, and enter literal assignments for UPDATE. Candidates come from direct SELECT output columns; replace `SELECT *` with explicit columns first. Missing or unsupported input disables copying. This tool prepares SQL without connecting to a database.
+
+| Dialect | Tier | Protection during backup |
+|---|---|---|
+| PostgreSQL | planned: validation on PostgreSQL 18 pending | INSERT SELECT with `FOR UPDATE OF t` in the same statement; READ COMMITTED supported |
+| MySQL 8.0 | reference: based on official documentation, not database-tested | Both tables must use transactional engines such as InnoDB; REPEATABLE READ required. `FOR UPDATE` takes record and, depending on search/index/plan, gap or next-key locks; exact unique-key lookups may take only record locks |
+| SQL Server | reference: based on official documentation, not database-tested | `UPDLOCK, HOLDLOCK`, including range protection and possible lock escalation |
+| Oracle 19c+ | reference: based on official documentation, not database-tested | `LOCK TABLE ... IN EXCLUSIVE MODE` blocks writes to the whole table; ordinary reads can continue, FOR UPDATE waits |
+
+Use **one new, initially empty backup table per operation**. Never append or reuse, even if an existing table is empty. Default names are `<table>_bk_<UTC yyyymmddhhmmss>_<4 characters>`, retaining schemas and quoting and shortening only the table-name portion to fit. Names are not guaranteed unique; change the work ID on collision. Limits: PostgreSQL 63 bytes, MySQL 64 characters, SQL Server 128 characters, Oracle 128 bytes with COMPATIBLE >= 12.2, otherwise 30 bytes (API: `oracleCompatible: 'legacy'`).
+
+| Empty-table method | Attribute inheritance |
+|---|---|
+| PostgreSQL CTAS | Does not inherit constraints or indexes |
+| MySQL CTAS | Does not inherit AUTO_INCREMENT; inherits NOT NULL and DEFAULT; expressions may change types |
+| Oracle CTAS | Conditionally inherits explicit NOT NULL; does not inherit PK, FK, indexes or defaults |
+| SQL Server SELECT INTO | Simple direct column selection inherits IDENTITY, with exceptions for joins, unions and expressions. This feature defaults to CREATE TABLE with explicit column definitions instead |
+
+Use five separate copies in an interactive client. Preparation DDL has a separate construction path from A–D. Keep B–D on the same connection and transaction.
+
+1. **0: Preparation.** Use a dedicated connection with no pending work; create a new empty table with matching types, precision and collations. Oracle/MySQL DDL commits implicitly; Oracle commits before valid DDL even if execution fails. SQL Server’s column-definition placeholder must be filled manually in this separate preparation template.
+2. **A: Precheck.** Confirm the backup is empty; inspect the original SELECT and record its candidate count. psql: autocommit ON, explicit BEGIN in B. Other clients must not commit between B and D. MySQL: autocommit=1, REPEATABLE-READ, both engines transactional, end A with ROLLBACK. Oracle: AUTOCOMMIT OFF, end A with ROLLBACK. SQL Server: IMPLICIT_TRANSACTIONS OFF, roll back any existing transaction at A’s end. Do not paste B on failure.
+3. **B: Back up and check.** Start, lock and copy; require backup count = A’s candidate count = present key count, no duplicate rows, NULL keys or missing matches. SQL Server requires @@TRANCOUNT=1; stop if 2 or greater. Review the final key list. A is preliminary; equal counts do not prove equal sets. The backup defines the final target. No transaction-ending statement is appended.
+4. **C: Change and check.** Change only backed-up keys, never reuse the original predicate. DELETE requires zero remaining target keys; UPDATE requires all keys present and zero value mismatches, including one-sided NULLs. Affected counts are supporting evidence only (MySQL counts changed rows). No transaction-ending statement is appended.
+5. **D: Finish.** ROLLBACK is the default. COMMIT is a separate copy inside a disclosure and commits backup and change together, only after all checks pass. SQL Server requires @@TRANCOUNT=0 afterward. Record the backup table, time and chosen operation.
+
+SQL errors, timeouts, cancellations and unknown check results are failures. If the transaction remains active on the same connection, roll back, confirm completion and restart. **On connection loss or an unknown COMMIT response, stop; do not retry or compensate.** A reconnecting ROLLBACK cannot undo a server-side commit. Confirm the original connection ended and establish the outcome from backup, target and work records. With psql `ON_ERROR_ROLLBACK=on`, later statements may still run after an error; the operator must stop.
+
+**Proposed compensation SQL (not a full restore)** is a conditional template with three boundaries: begin/lock/precheck; compensation DML/postcheck; finish (separate ROLLBACK and COMMIT copies). UPDATE checks existence, one-to-one matching and expected post-change values, locking mismatching rows too. DELETE checks absence, which row locks cannot protect. Keys must be enforced by valid database constraints, all relevant unique constraints must be immediate, SQL Server IGNORE_DUP_KEY must be OFF, and duplicates must never be ignored. A concurrent insert must cause a constraint error and rollback of the entire compensation unit. Add checks for known non-key unique constraints manually. Confirm all recovery columns were backed up, omitted columns may receive DEFAULT/NULL, and no insert column is unwritable. `--identity none` describes column attributes only; it never promotes an untested dialect. `backupSet` cannot verify attributes and always returns compensation as reference.
+
+Excluded: automatic compensation SQL generation (only conditional templates for human review are provided), batch execution, pasting the entire procedure at once, key-IN shapes, multiple tables, expression assignments, changing keys, generated keys, partial compensation, automatic column matching and per-column writability management. Compensation for identity/generated/computed/rowversion columns is reference only. FK cascades, triggers and audit side effects are not restored; those operations require a separate recovery procedure. Never compensate a rolled-back change. Check backup permissions and retention before starting; remove tables according to work records and organizational policy. No DROP is generated.
+
+Additional conservative restrictions: predicates containing subqueries are rejected for every dialect. Assignment strings containing line breaks or backslashes, and TRUE/FALSE assignments for Oracle / SQL Server, are rejected because interpretation depends on product or settings. Declared update-column mismatches, invalid insert-column subsets and partial-compensation inputs also receive reason codes.
+
+```sh
+node cli/sqlmegane.mjs convert --to delete --dialect postgres --backup-table t_log_bk --backup-columns id,created_at --key-columns id --stage all -
+node cli/sqlmegane.mjs convert --to update --dialect postgres --backup-columns id,status --key-columns id --set "status='DONE'" --stage change input.sql
+node cli/sqlmegane.mjs template --kind compensate-delete --dialect postgres --identity none
+```
+
+`--stage` accepts `prepare|precheck|backup|change|rollback|commit|all`. `all` is for review, begins with a warning against pasting everything at once and separates the stages with headings. Rejections use the shared validator, print reason codes to stderr and exit with code 2. `--json` returns the exact `backupSet` result. Unsupported inputs never fall back to ordinary conversion.
+
+`node tests/run-tests.mjs` checks generated strings and contracts. `npm run test:pg` skips without a `SQLMEGANE_PG` connection string; otherwise it runs generated SQL on PostgreSQL 18. Before release, save results under `business/qa/`, check interactive clients and disconnection procedures, and perform the blind review. Retain the planned tier until database validation is complete.
+
 ## Templates
 
 Dialect-specific templates are available for UPDATE, DELETE, INSERT SELECT, UPSERT / MERGE, and CREATE TABLE. They appear in a separate preview and do not replace the current input. Fillable locations use only `<table>`, `<column>`, `<value>`, `<condition>`, `<key>`, and `<source>`. An unfilled placeholder outside strings and comments is reported as danger.

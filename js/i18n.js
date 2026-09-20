@@ -591,6 +591,76 @@ const en = { ...ja, ...englishFindings,
   'ui.noValidSql': 'No valid SQL statement was found.',
 };
 
+const backupMessages = {
+  'compApply.start': ['補償 1/3 の全検査合格後だけ、同じ接続・トランザクションで実行。1 件でも不一致なら実行禁止。', 'Execute on the same connection and transaction only after every compensation 1/3 check passes. Do not execute if any row mismatches.'],
+  'compCommit.pass': ['合格条件：補償 2/3 の全検査が合格、補償の確定完了を確認。SQL Server @@TRANCOUNT = 0。', 'Pass: all compensation 2/3 checks passed; confirm compensation committed. SQL Server @@TRANCOUNT = 0.'],
+  planned: ['PostgreSQL 18 で検証予定', 'Planned validation on PostgreSQL 18'],
+  reference: ['公式ドキュメントに基づく参考型紙・実機未検証', 'Reference template based on official documentation; not tested on a database'],
+  errors: ['SQL エラー・タイムアウト・取消し・検査結果不明はすべて不合格。同じ接続で継続中なら ROLLBACK し終了確認後やり直す。接続喪失・COMMIT 応答不明は停止。', 'Any SQL error, timeout, cancellation or unknown check result is a failure. If still active on the same connection, ROLLBACK, confirm completion and restart. Stop on connection loss or an unknown COMMIT outcome.'],
+  unknown: ['接続喪失・COMMIT 応答不明は結果不明として停止、再実行・補償禁止。再接続後の ROLLBACK では取り消せない。元接続の終了と退避表・対象表・作業記録から確定結果を確認。', 'Connection loss or no COMMIT response means an unknown outcome: stop; do not retry or compensate. ROLLBACK after reconnecting cannot undo a committed transaction. Confirm the original connection ended and establish the outcome from backup, target and work records.'],
+  locks: ['ロックは COMMIT / ROLLBACK まで保持。B〜D は同じ接続。索引・実行計画により対象外の行や挿入も待機。Oracle は表全体の書き込みを待たせる。検査は開始前に準備し、待機・中断時は ROLLBACK。', 'Locks last until COMMIT / ROLLBACK. Use the same connection for B–D. Indexes and plans may block other rows and inserts; Oracle blocks writes to the entire table. Prepare checks before starting; roll back on waits or interruption.'],
+  connection: ['専用接続・未確定作業なし。B〜D の間にクライアントが勝手に COMMIT しない設定を確認。', 'Use a dedicated connection with no pending work. Ensure the client will not commit automatically between B and D.'],
+  'connection.postgres': ['psql は自動コミット ON、B で明示 BEGIN。ON_ERROR_ROLLBACK が ON でもエラーは不合格。他クライアントは画面で設定確認。', 'In psql keep autocommit ON and use the explicit BEGIN in B. Errors remain failures with ON_ERROR_ROLLBACK enabled. Check other clients in their UI.'],
+  'connection.mysql': ['autocommit=1、REPEATABLE-READ 必須。両表が InnoDB 等のトランザクション対応エンジン。READ COMMITTED なら B を貼らない。', 'Require autocommit=1, REPEATABLE-READ and transactional engines such as InnoDB for both tables. Do not paste B under READ COMMITTED.'],
+  'connection.oracle': ['SQL*Plus 対話、AUTOCOMMIT OFF。Oracle 19c 以降。128 バイトの識別子には COMPATIBLE 12.2 以上が必要（それ未満は30バイト）。', 'SQL*Plus interactive, AUTOCOMMIT OFF, Oracle 19c or later. 128-byte identifiers require COMPATIBLE >= 12.2 (otherwise 30 bytes).'],
+  'connection.mssql': ['IMPLICIT_TRANSACTIONS OFF。B 開始後 @@TRANCOUNT = 1、D 終了後 = 0。2 以上なら ROLLBACK してやり直す。', 'Use IMPLICIT_TRANSACTIONS OFF. Require @@TRANCOUNT = 1 after B starts and 0 after D. Roll back and restart if it is 2 or greater.'],
+  affected: ['影響行数は補助証拠。クライアント表示を確認。MySQL UPDATE は値が変わった行数（CLIENT_FOUND_ROWS なら一致行数）。合否は検査 SELECT で判定。', 'Affected rows are supporting evidence; check client feedback. MySQL UPDATE counts changed rows (matched rows with CLIENT_FOUND_ROWS). Determine success from check queries.'],
+  scope: ['キーは不変・非 NULL の DB 一意制約の全列。生成列キーは対象外。連鎖変更・トリガーは別途復旧手順がなければ対象外。退避先の権限・保管期限を確認し、削除は作業記録と組織の期限に従う。', 'Keys must be immutable, non-null and include all columns of a database unique constraint; generated keys are unsupported. Cascades and triggers require separate recovery procedures. Check backup permissions and retention; remove backups according to work records and organizational policy.'],
+  countNotice: ['A の候補件数と B の退避件数を毎回照合。不一致は中止。件数一致はキー集合一致の証明ではない。A は予備確認、B の退避集合が最終対象。', 'Always compare A’s candidate count with B’s backup count; stop on any difference. Equal counts do not prove equal key sets. A is preliminary; B’s backed-up keys define the final target.'],
+  'prepare.note': ['専用接続・未確定作業なしで実行。Oracle / MySQL の DDL は暗黙コミット（Oracle は失敗時も実行前コミット）。同名表は空でも流用禁止、作業 ID を変更。列とキーの型・精度・照合規則を元表に合わせる。SQL Server は列定義を記入して別作業で作成。', 'Use a dedicated connection with no pending work. Oracle / MySQL DDL commits implicitly (Oracle commits before even failed valid DDL). Never reuse an existing table, even if empty; change the work ID. Match column and key types, precision and collations. Fill SQL Server column definitions and create separately.'],
+  compensation: ['補償 SQL 案（完全復元ではない）', 'Proposed compensation SQL (not a full restore)'],
+  compNote: ['更新した列だけをキーで戻す（DELETE は再挿入）。FK 連鎖・トリガー・監査列の副作用は戻らない。変更を ROLLBACK した作業には補償禁止。全一意制約の衝突を自動確認していない。退避表全体が対象、部分補償不可。型紙は人が前提を確認してから使用。', 'Restore updated columns by key (reinsert for DELETE). FK cascades, triggers and audit side effects are not undone. Never compensate a rolled-back change. Not all unique conflicts were checked automatically. Use the entire backup table; partial compensation is unsupported. Review all prerequisites before using the template.'],
+  identity: ['識別列・生成列・計算列・rowversion がある、または属性未確認なら対象外（参考のみ）。式の代入も対象外。', 'Identity, generated, computed or rowversion columns, and unconfirmed attributes, are unsupported (reference only). Expression assignments are unsupported.'],
+  deleteContract: ['必要な全列を退避したか、省略列に DEFAULT / NULL が入ってよいか、書き戻せない列がないか確認。キーは有効な DB 制約で強制し、一意制約は即時検査。SQL Server IGNORE_DUP_KEY = OFF。重複無視禁止。不在は行ロックで保護できない。検査後の競合は制約違反として検出し全体 ROLLBACK。キー以外の既知の一意制約の衝突検査を人が追記し、全て合格するまで次を貼らない。', 'Confirm all recovery columns were backed up, omitted columns may receive DEFAULT / NULL, and every insert column is writable. Keys must be enforced by valid database constraints; all relevant unique constraints must be immediate. Require SQL Server IGNORE_DUP_KEY = OFF. Never ignore duplicates. Row locks cannot protect absence; races must cause constraint errors and a full rollback. Add checks for known non-key unique constraints; do not proceed until all pass.'],
+  all: ['一括貼り付け用ではありません。段階ごとに停止して結果を確認し、次のコピーを選択してください。', 'Not for pasting or executing all at once. Stop at each stage, review results and choose the next copy.'],
+  title: ['退避してから変更する', 'Back up before changing'],
+  backupTable: ['退避表名', 'Backup table'],
+  backupColumns: ['退避する列（明示選択）', 'Columns to back up (select explicitly)'],
+  keyColumns: ['キー列（複合キーは全列）', 'Key columns (all columns of a composite key)'],
+  assignments: ['UPDATE：更新列と単純リテラル値', 'UPDATE: columns and literal values'],
+  copyCommit: ['COMMIT をコピー（退避と変更が一緒に確定する）', 'Copy COMMIT (commit backup and change together)'],
+  confirmCommit: ['全検査合格後に確定する', 'Commit after all checks pass'],
+};
+ja['ui.template.backup-table'] = '空の退避表を作る'; en['ui.template.backup-table'] = 'Create an empty backup table';
+ja['ui.template.compensate-update'] = 'UPDATE の補償 SQL 案'; en['ui.template.compensate-update'] = 'UPDATE compensation template';
+ja['ui.template.compensate-delete'] = 'DELETE の補償 SQL 案'; en['ui.template.compensate-delete'] = 'DELETE compensation template';
+const backupStages = {
+  prepare: ['段階 0：準備（別作業）', 'Stage 0: Preparation (separate work)', '新規の空表、元表と同じ型・精度・照合規則。', 'New empty table with matching types, precision and collations.', '流用せず作業 ID を変更。A を貼らない。', 'Do not reuse the table; change the work ID. Do not paste A.'],
+  precheck: ['段階 A：事前検査', 'Stage A: Precheck', '接続前提を満たす、退避表 0 件。元 SELECT と候補件数を確認・記録。', 'Connection prerequisites satisfied; backup empty. Review and record original rows and candidate count.', 'B を貼らない。', 'Do not paste B.'],
+  backup: ['段階 B：退避と検査', 'Stage B: Back up and check', '退避件数＝A の候補件数＝対象キー存在件数。重複 0 行・NULL 0・対応漏れ 0。最終キー一覧を確認。SQL Server @@TRANCOUNT = 1。', 'Backup count = A’s candidate count = present key count. No duplicate rows, NULL keys or missing keys. Review final keys. SQL Server @@TRANCOUNT = 1.', 'D の ROLLBACK。C を貼らない。', 'Paste D’s ROLLBACK; do not paste C.'],
+  change: ['段階 C：変更と検査', 'Stage C: Change and check', 'DELETE は対象キー 0 件。UPDATE は対応漏れ 0・値の不一致 0。', 'DELETE: no target keys remain. UPDATE: no missing keys or value mismatches.', 'D の ROLLBACK。COMMIT 禁止。', 'Paste D’s ROLLBACK; do not COMMIT.'],
+  rollback: ['段階 D：ROLLBACK', 'Stage D: ROLLBACK', '取り消しの完了を確認。SQL Server @@TRANCOUNT = 0。', 'Confirm rollback completed. SQL Server @@TRANCOUNT = 0.', '終了不明なら停止し元接続と結果を調査。', 'If completion is unknown, stop and investigate the original connection and outcome.'],
+  commit: ['段階 D：COMMIT', 'Stage D: COMMIT', 'C の全検査が合格、退避と変更の確定完了を確認。SQL Server @@TRANCOUNT = 0。', 'All C checks passed; confirm backup and change both committed. SQL Server @@TRANCOUNT = 0.', '応答不明なら停止。再実行・補償禁止。', 'On an unknown response, stop; do not retry or compensate.'],
+  compPrecheck: ['補償 1/3：開始・ロック・事前検査', 'Compensation 1/3: Begin, lock and precheck', '全退避キーが一意・非 NULL。UPDATE は存在・1 対 1・期待値一致。DELETE は不在・既知の一意制約衝突なし。', 'All backup keys unique and non-null. UPDATE: existence, one-to-one matches and expected values. DELETE: absence and no known unique conflicts.', '1 件でも不一致なら 2/3 を貼らず ROLLBACK。', 'On any mismatch, do not paste 2/3; ROLLBACK.'],
+  compApply: ['補償 2/3：補償 DML・事後検査', 'Compensation 2/3: DML and postcheck', '存在件数＝退避件数、対応漏れ 0・退避値との不一致 0。', 'Present count = backup count; no missing keys or differences from backed-up values.', '補償単位全体を ROLLBACK。', 'ROLLBACK the entire compensation unit.'],
+};
+for (const [key, values] of Object.entries(backupStages)) {
+  backupMessages[`${key}.title`] = values.slice(0, 2);
+  backupMessages[`${key}.pass`] = [`合格条件：${values[2]}`, `Pass: ${values[3]}`];
+  backupMessages[`${key}.fail`] = [`不合格なら：${values[4]}`, `On failure: ${values[5]}`];
+}
+for (const [key, values] of Object.entries(backupMessages)) {
+  ja[`dml.backup.${key}`] = values[0]; en[`dml.backup.${key}`] = values[1];
+}
+const backupReasons = {
+  'assignment-columns-mismatch': ['申告した更新列と assignments の代入先が一致しません。', 'Declared update columns do not match assignment targets.'],
+  'backup-columns-required': ['退避列は空欄と * を使わず明示してください。', 'Specify explicit backup columns; empty lists and * are not allowed.'],
+  'key-columns-required': ['キー列を指定してください。', 'Specify key columns.'],
+  'key-not-in-backup': ['キー全列を退避列に含めてください。', 'Include every key column in the backup.'],
+  'update-columns-not-in-backup': ['更新列を全て退避列に含めてください。', 'Include every assigned column in the backup.'],
+  'key-column-assigned': ['キー列への代入は対象外です。', 'Assigning to key columns is unsupported.'],
+  'duplicate-column': ['同じ列が重複しています。', 'A column occurs more than once.'],
+  'backup-table-same-as-target': ['退避先と対象表が同じです。', 'The backup and target table are the same.'],
+  'backup-name-too-long': ['退避表名が識別子の長さ制限を超えています。', 'The backup name exceeds the identifier length limit.'],
+  'expression-assignment': ['単純リテラルとして扱えない値です。式の代入は対象外です。', 'This value cannot be used as a simple literal. Expression assignments are unsupported.'],
+  'lock-method-undefined': ['この方言・形・分離レベルのロック方式は未対応です。', 'No supported lock method exists for this dialect, shape or isolation level.'],
+  'unfilled-placeholder': ['未記入の値、プレースホルダ、または不正な識別子があります。', 'A value is missing, a placeholder is unfilled, or an identifier is invalid.'],
+  'insert-columns-not-in-backup': ['書き戻す列はキー全列を含み、退避列の範囲内にしてください。', 'Insert columns must contain every key and be a subset of the backup columns.'],
+  'partial-compensation-unsupported': ['部分補償は対象外です。', 'Partial compensation is unsupported.'],
+};
+for (const [key, values] of Object.entries(backupReasons)) {
+  ja[`dml.reason.${key}`] = values[0]; en[`dml.reason.${key}`] = values[1];
+}
 const messages = { ja, en };
 
 function getLocale() { return locale; }

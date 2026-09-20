@@ -2886,6 +2886,184 @@ test('検算SELECT（簡易チェック）: 結合を含む DML では結合表�
 });
 
 // ---------------------------------------------------------------------------
+// Backup sets: keep all existing tests above unchanged.
+const backupInput = "SELECT id, value FROM demo WHERE value = 'old';";
+const backupOptions = { dialect: 'postgres', to: 'update', shape: 'single', backupTable: 'demo_bk', backupColumns: ['id', 'value'], keyColumns: ['id'], assignments: [{ column: 'value', value: "'new'" }], now: '2026-09-20T00:00:00Z', workId: 'a123', locale: 'en' };
+const buildBackup = (options = {}, sql = backupInput) => DmlBuilder.backupSet(sql, { ...backupOptions, ...options });
+for (const dialect of ['postgres', 'mysql', 'mssql', 'oracle']) {
+  for (const to of ['update', 'delete']) {
+    const r = buildBackup({ dialect, to });
+    test(`backup ${dialect}/${to}: tier and original`, () => {
+      assert.equal(r.status, 'ok'); assert.equal(r.originalSelect, backupInput);
+      assert.equal(r.dialectTier, dialect === 'postgres' ? 'planned' : 'reference');
+      assert.equal(r.compensation.tier, 'reference');
+    });
+    for (const name of ['prepare', 'precheck', 'backup', 'change']) test(`backup ${dialect}/${to}: ${name}`, () => {
+      const s = r.stages[name]; assert.ok(s.title && s.passCondition && s.onFail);
+      assert.match(s.sql, /Any SQL error/); assert.doesNotMatch(s.sql, /undefined/);
+      if (name === 'prepare') assert.match(s.sql, /CREATE TABLE demo_bk/);
+      else assert.doesNotMatch(s.sql, /CREATE TABLE/);
+      if (name === 'precheck') assert.match(s.sql, /COUNT\(\*\).*demo_bk/);
+      if (name === 'backup') { assert.match(s.sql, /INSERT INTO demo_bk \(id, value\) SELECT t.id, t.value/); assert.match(s.sql, /HAVING COUNT\(\*\) > 1/); assert.match(s.sql, /null_keys/); assert.match(s.sql, /ORDER BY b.id/); }
+      if (name === 'change') { assert.match(s.sql, /t.id IN \(SELECT b.id FROM demo_bk b\)/); assert.doesNotMatch(s.sql, /value = 'old'/); }
+      if (['backup', 'change'].includes(name)) assert.doesNotMatch(s.sql, /^\s*(ROLLBACK|COMMIT)\b/m);
+    });
+    test(`backup ${dialect}/${to}: independent finish`, () => {
+      assert.match(r.stages.finish.rollback.sql, /^ROLLBACK/m); assert.doesNotMatch(r.stages.finish.rollback.sql, /^COMMIT/m);
+      assert.match(r.stages.finish.commit.sql, /^COMMIT/m); assert.doesNotMatch(r.stages.finish.commit.sql, /^ROLLBACK/m);
+      assert.match(r.stages.finish.commit.sql, /do not retry or compensate/);
+    });
+    test(`backup ${dialect}/${to}: compensation boundary`, () => {
+      const s = Templates.get(`compensate-${to}`, dialect, { locale: 'en', identity: 'none' });
+      assert.equal((s.match(/^-- ===== [123]\/3 /gm) || []).length, 3);
+      assert.doesNotMatch(r.compensation.precheck.sql, /^(INSERT|UPDATE|MERGE|DELETE) /m);
+      assert.match(r.compensation.apply.sql, /^(INSERT|UPDATE|MERGE) /m);
+      assert.match(r.compensation.precheck.sql, to === 'update' ? /AS missing_keys/ : /AS present_keys/);
+      assert.match(r.compensation.precheck.sql, /not a full restore/);
+      assert.doesNotMatch(r.compensation.apply.sql, /^\s*(ROLLBACK|COMMIT)\b/m);
+    });
+  }
+  test(`backup ${dialect}: direct NULL mismatch`, () => {
+    const s = buildBackup({ dialect, assignments: [{ column: 'value', value: 'NULL' }] }).stages.change.sql;
+    if (dialect === 'postgres') assert.match(s, /t.value IS DISTINCT FROM NULL/);
+    else if (dialect === 'mysql') assert.match(s, /NOT \(t.value <=> NULL\)/);
+    else { assert.match(s, /t.value IS NULL AND NULL IS NOT NULL/); assert.match(s, /t.value IS NOT NULL AND NULL IS NULL/); }
+  });
+}
+const backupRejections = [
+  ['assignment-columns-mismatch', { updateColumns: ['other'] }],
+  ['backup-columns-required', { backupColumns: [] }], ['backup-columns-required', { backupColumns: ['*'] }],
+  ['key-columns-required', { keyColumns: [] }], ['key-not-in-backup', { keyColumns: ['other'] }],
+  ['update-columns-not-in-backup', { assignments: [{ column: 'other', value: '1' }] }],
+  ['key-column-assigned', { assignments: [{ column: 'id', value: '1' }] }],
+  ['duplicate-column', { backupColumns: ['id', 'id', 'value'] }], ['duplicate-column', { keyColumns: ['id', 'ID'] }],
+  ['duplicate-column', { assignments: [{ column: 'value', value: '1' }, { column: 'value', value: '2' }] }],
+  ['backup-table-same-as-target', { backupTable: 'demo' }], ['backup-name-too-long', { backupTable: 'x'.repeat(64) }],
+  ['expression-assignment', { assignments: [{ column: 'value', value: 'value + 1' }] }],
+  ['expression-assignment', { assignments: [{ column: 'value', value: 'NOW()' }] }],
+  ['lock-method-undefined', { dialect: 'generic' }], ['lock-method-undefined', { shape: 'by-key' }],
+  ['lock-method-undefined', { dialect: 'mysql', isolation: 'READ COMMITTED' }],
+  ['unfilled-placeholder', { assignments: [] }], ['unfilled-placeholder', { backupTable: '<backup>' }],
+  ['unfilled-placeholder', { assignments: [{ column: 'value', value: '<value>' }] }],
+  ['unfilled-placeholder', { backupColumns: ['id', 'value; DROP TABLE demo'] }],
+  ['insert-columns-not-in-backup', { insertColumns: ['id', 'other'] }],
+  ['insert-columns-not-in-backup', { insertColumns: ['value'] }],
+  ['partial-compensation-unsupported', { partial: true }],
+];
+backupRejections.forEach(([code, options], i) => test(`backup rejection ${i}: ${code}`, () => {
+  const r = buildBackup(options); assert.equal(r.status, 'unsupported'); assert.ok(r.reasonCodes.includes(code));
+  assert.equal(r.stages, null); assert.equal(r.compensation, null);
+  for (const locale of ['ja', 'en']) assert.ok(globalThis.SQLMeganeI18n.messages[locale][`dml.reason.${code}`]);
+}));
+for (const [code, sql] of [
+  ['cte-unsupported-v1', 'WITH x AS (SELECT id FROM demo) SELECT id FROM x'],
+  ['join-unsupported-v1', 'SELECT a.id FROM demo a JOIN other b ON a.id = b.id'],
+  ['grouping', 'SELECT COUNT(*) FROM demo'],
+  ['lock-method-undefined', 'SELECT id, value FROM demo WHERE id IN (SELECT id FROM other)'],
+]) test(`backup existing shape: ${code}`, () => assert.ok(buildBackup({}, sql).reasonCodes.includes(code)));
+test('backup postgres locks in INSERT and no trailing rollback', () => {
+  assert.match(buildBackup().stages.backup.sql, /INSERT INTO[\s\S]*FOR UPDATE OF t;/);
+  assert.doesNotMatch(buildBackup().stages.backup.sql.trim(), /ROLLBACK;$/);
+});
+test('backup SQL Server composite EXISTS and transaction contract', () => {
+  const r = buildBackup({ dialect: 'mssql', to: 'delete', keyColumns: ['id', 'value'] });
+  assert.match(r.stages.change.sql, /WHERE EXISTS \(SELECT 1 FROM demo_bk b WHERE t.id = b.id AND t.value = b.value\)/);
+  assert.match(r.stages.precheck.sql, /SET IMPLICIT_TRANSACTIONS OFF;/);
+  assert.match(r.stages.precheck.sql, /IF @@TRANCOUNT > 0 ROLLBACK TRANSACTION;/);
+  assert.match(r.stages.backup.sql, /BEGIN TRANSACTION;\nSELECT @@TRANCOUNT/);
+  assert.match(r.stages.backup.sql, /WITH \(UPDLOCK, HOLDLOCK\)/);
+  assert.match(r.stages.finish.commit.sql, /COMMIT TRANSACTION;\nSELECT @@TRANCOUNT/);
+});
+test('backup generated name preserves schema and quoted escape', () => {
+  assert.equal(DmlBuilder.backupName('public."a""b"', 'postgres', backupOptions), 'public."a""b_bk_20260920000000_a123"');
+  assert.equal(buildBackup({ backupTable: undefined }).backupTable, 'demo_bk_20260920000000_a123');
+});
+test('backup generated name truncates by UTF-8 bytes', () => {
+  const name = DmlBuilder.backupName('"' + 'あ'.repeat(30) + '"', 'postgres', backupOptions);
+  assert.ok(Buffer.byteLength(name.slice(1, -1)) <= 63); assert.match(name, /_a123"$/);
+});
+test('backup supplied name length limits for each dialect', () => {
+  for (const [dialect, max] of [['postgres', 63], ['mysql', 64], ['mssql', 128], ['oracle', 128]]) {
+    assert.equal(buildBackup({ dialect, backupTable: 'b'.repeat(max) }).status, 'ok');
+    assert.ok(buildBackup({ dialect, backupTable: 'b'.repeat(max + 1) }).reasonCodes.includes('backup-name-too-long'));
+  }
+});
+test('backup assignments share SET, change check and compensation expected check', () => {
+  const r = buildBackup({ backupColumns: ['id', 'value', 'other'], assignments: [{ column: 'value', value: 'NULL' }, { column: 'other', value: '12' }] });
+  assert.match(r.stages.change.sql, /SET value = NULL, other = 12/);
+  for (const sql of [r.stages.change.sql, r.compensation.precheck.sql, r.compensation.apply.sql]) assert.match(sql, /t.value IS DISTINCT FROM NULL OR t.other IS DISTINCT FROM 12/);
+});
+test('backup ja/en translation keys remain identical', () => assert.deepEqual(Object.keys(globalThis.SQLMeganeI18n.messages.ja).sort(), Object.keys(globalThis.SQLMeganeI18n.messages.en).sort()));
+
+const backupCli = await import('../cli/sqlmegane.mjs');
+test('backup CLI all begins with separate-copy notice', () => {
+  const opts = backupCli.parseSubcommand(['--to', 'delete', '--dialect', 'postgres', '--backup-table', 'demo_bk', '--backup-columns', 'id,value', '--key-columns', 'id', '--stage', 'all', '-'], 'convert');
+  const output = backupCli.renderBackup(backupInput, opts);
+  assert.equal(output.code, 0); assert.match(output.stdout, /^-- 一括貼り付け用ではありません/);
+  assert.equal((output.stdout.match(/^-- ===== 段階 /gm) || []).length, 6);
+});
+test('backup CLI generic rejects with code 2 and reason', () => {
+  const output = backupCli.renderBackup(backupInput, { ...backupOptions, dialect: 'generic', lang: 'en' });
+  assert.equal(output.code, 2); assert.match(output.stderr, /\[lock-method-undefined\]/); assert.equal(output.stdout, '');
+});
+test('backup CLI JSON is the exact shared result', () => {
+  const output = backupCli.renderBackup(backupInput, { ...backupOptions, json: true, lang: 'en' });
+  assert.deepEqual(JSON.parse(output.stdout), output.result);
+});
+test('backup CLI every validator reason is shared', () => {
+  for (const [code, options] of backupRejections) {
+    const output = backupCli.renderBackup(backupInput, { ...backupOptions, ...options, byKey: options.shape === 'by-key' ? 'id' : undefined, lang: 'en' });
+    assert.equal(output.code, 2); assert.ok(output.stderr.includes(`[${code}]`));
+  }
+});
+test('backup CLI repeated structured assignments', () => {
+  const opts = backupCli.parseSubcommand(['--to', 'update', '--set', "value='a=b'", '--set', 'other=NULL'], 'convert');
+  assert.deepEqual(opts.assignments, [{ column: 'value', value: "'a=b'" }, { column: 'other', value: 'NULL' }]);
+});
+test('backup CLI individual stage has no DDL or termination', () => {
+  const out = backupCli.renderBackup(backupInput, { ...backupOptions, stage: 'change', lang: 'en' });
+  assert.doesNotMatch(out.stdout, /^(CREATE|COMMIT|ROLLBACK)/m); assert.equal(out.code, 0);
+});
+test('backup template identity none never promotes reference dialect', () => {
+  for (const d of ['mysql', 'mssql', 'oracle']) assert.match(Templates.get('compensate-delete', d, { identity: 'none', locale: 'en' }), /^-- Reference template/);
+});
+test('backup compensation finish is split from template with separate executable endings', () => {
+  const r = buildBackup();
+  assert.match(r.compensation.finish.rollback.sql, /^ROLLBACK;/m);
+  assert.doesNotMatch(r.compensation.finish.rollback.sql, /^COMMIT;/m);
+  assert.match(r.compensation.finish.commit.sql, /^COMMIT;/m);
+  assert.doesNotMatch(r.compensation.finish.commit.sql, /^ROLLBACK;/m);
+  assert.match(r.compensation.finish.commit.sql, /all compensation 2\/3 checks passed/);
+});
+test('backup rejects unfilled bind parameters', () => {
+  for (const value of [':id', '?', '$1']) assert.ok(buildBackup({}, `SELECT id,value FROM demo WHERE id=${value}`).reasonCodes.some((c) => ['unfilled-placeholder', 'parse-failed'].includes(c)));
+});
+test('backup quoted alias is rewritten without changing string literals', () => {
+  const r = buildBackup({}, "SELECT d.id,d.value FROM demo d WHERE d.value='d.id';");
+  assert.equal(r.status, 'ok'); assert.match(r.stages.backup.sql, /WHERE t.value='d.id'/);
+});
+test('backup compensation DELETE uses full backup and no duplicate-ignore syntax', () => {
+  for (const dialect of ['postgres', 'mysql', 'mssql', 'oracle']) {
+    const sql = buildBackup({ dialect, to: 'delete' }).compensation.apply.sql;
+    assert.match(sql, /INSERT INTO demo \(id, value\) SELECT b.id, b.value FROM demo_bk b;/);
+    assert.doesNotMatch(sql, /INSERT IGNORE|ON CONFLICT|ON DUPLICATE/);
+  }
+});
+
+test('backup quoted case-sensitive columns cannot bypass subset validation', () => {
+  const r = buildBackup({ assignments: [{ column: '"VALUE"', value: '1' }] });
+  assert.ok(r.reasonCodes.includes('update-columns-not-in-backup'));
+  const key = buildBackup({ keyColumns: ['"ID"'] });
+  assert.ok(key.reasonCodes.includes('key-not-in-backup'));
+});
+test('backup Oracle MERGE keeps expected state outside ON', () => {
+  const sql = buildBackup({ dialect: 'oracle' }).compensation.apply.sql;
+  assert.match(sql, /ON \(t.id = b.id\) WHEN MATCHED THEN UPDATE SET t.value = b.value WHERE NOT/);
+});
+test('backup placeholder in SELECT output blocks A-D', () => {
+  assert.equal(buildBackup({}, 'SELECT id, $1 FROM demo').status, 'unsupported');
+});
+
 // 結果表示
 // ---------------------------------------------------------------------------
 

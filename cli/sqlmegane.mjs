@@ -308,7 +308,7 @@ function installEpipeHandler() {
   }
 }
 
-function parseSubcommand(argv, command) {
+export function parseSubcommand(argv, command) {
   const out = {
     command, to: null, kind: null, dialect: command === 'convert' ? 'auto' : 'generic',
     oracleVersion: 'legacy', columns: [], safeBlock: null, commit: false, failOn: 'danger',
@@ -336,6 +336,15 @@ function parseSubcommand(argv, command) {
       else if (name === '--target') out.target = take();
       else if (name === '--by-key') out.byKey = take();
       else if (name === '--target-key') out.targetKey = take();
+      else if (name === '--backup-table') out.backupTable = take();
+      else if (name === '--backup-columns') out.backupColumns = take().split(',').map((s) => s.trim());
+      else if (name === '--key-columns') out.keyColumns = take().split(',').map((s) => s.trim());
+      else if (name === '--stage') out.stage = take();
+      else if (name === '--identity') out.identity = take();
+      else if (name === '--set') {
+        const assignment = take(), at = assignment.indexOf('=');
+        (out.assignments ||= []).push({ column: at < 0 ? assignment : assignment.slice(0, at).trim(), value: at < 0 ? '' : assignment.slice(at + 1).trim() });
+      }
       else if (name === '--safe-block') out.safeBlock = take();
       else if (name === '--fail-on') out.failOn = take();
       else if (name === '--lang') out.lang = take();
@@ -361,7 +370,7 @@ function parseSubcommand(argv, command) {
     if (!!out.target !== !!out.byKey) throw new UsageError('--target and --by-key must be specified together');
     if (out.targetKey && !out.byKey) throw new UsageError('--target-key requires --target and --by-key');
   } else if (command === 'template') {
-    if (!['update', 'delete', 'insert-select', 'upsert', 'merge', 'create-table', 'safe-block'].includes(out.kind)) throw new UsageError('Invalid or missing --kind');
+    if (!['update', 'delete', 'insert-select', 'upsert', 'merge', 'create-table', 'safe-block', 'backup-table', 'compensate-update', 'compensate-delete'].includes(out.kind)) throw new UsageError('Invalid or missing --kind');
     if (out.dialect === 'auto') throw new UsageError('template requires an explicit dialect');
   } else if (command === 'inspect') {
     if (out.dialect === 'auto') throw new UsageError('inspect requires an explicit dialect');
@@ -369,12 +378,22 @@ function parseSubcommand(argv, command) {
   return out;
 }
 
-async function runSubcommand(command, argv) {
+export function renderBackup(sql, opts) {
+  const result = DmlBuilder.backupSet(sql, { ...opts, locale: opts.lang, shape: opts.byKey ? 'by-key' : 'single' });
+  if (result.status !== 'ok') return { result, code: 2, stdout: opts.json ? JSON.stringify(result, null, 2) + '\n' : '', stderr: result.reasonCodes.map((c) => `[${c}] ${I18n.messages[opts.lang === 'en' ? 'en' : 'ja'][`dml.reason.${c}`]}`).join('\n') + '\n' };
+  const stage = opts.stage || 'all';
+  const stages = { prepare: result.stages.prepare, precheck: result.stages.precheck, backup: result.stages.backup, change: result.stages.change, ...result.stages.finish };
+  if (stage !== 'all' && !stages[stage]) throw new UsageError('Invalid --stage');
+  const output = stage === 'all' ? `-- ${DmlBuilder.backupMessage('all', opts.lang)}\n` + Object.values(stages).map((s) => `-- ===== ${s.title} =====\n${s.sql}`).join('\n') : stages[stage].sql;
+  return { result, code: 0, stdout: opts.json ? JSON.stringify(result, null, 2) + '\n' : output, stderr: '' };
+}
+
+export async function runSubcommand(command, argv) {
   let opts;
   try { opts = parseSubcommand(argv, command); I18n.setLocale(opts.lang); }
   catch (err) { process.stderr.write(`${err.message}\n`); process.exitCode = 1; return; }
   if (command === 'template') {
-    process.stdout.write(Templates.get(opts.kind, opts.dialect, { oracleVersion: opts.oracleVersion, locale: opts.lang }) + '\n');
+    process.stdout.write(Templates.get(opts.kind, opts.dialect, { oracleVersion: opts.oracleVersion, locale: opts.lang, identity: opts.identity }) + '\n');
     process.exitCode = 0;
     return;
   }
@@ -382,6 +401,14 @@ async function runSubcommand(command, argv) {
   try { sql = await readInput(opts.file, opts.maxBytes); }
   catch (err) { process.stderr.write(`${err.message}\n`); process.exitCode = 1; return; }
   if (!sql.trim()) { process.stderr.write((opts.lang === 'en' ? 'SQL input is empty.' : 'SQL が空です。') + '\n'); process.exitCode = 1; return; }
+  const backupMode = opts.backupTable !== undefined || opts.backupColumns !== undefined || opts.keyColumns !== undefined || opts.stage !== undefined || opts.assignments !== undefined;
+  if (command === 'convert' && backupMode) {
+    try {
+      const output = renderBackup(sql, opts);
+      process.stdout.write(output.stdout); process.stderr.write(output.stderr); process.exitCode = output.code;
+    } catch (err) { process.stderr.write(err.message + '\n'); process.exitCode = 1; }
+    return;
+  }
   if (command === 'inspect') {
     const inspected = DmlBuilder.inspect(sql, { dialect: opts.dialect });
     process.stdout.write(JSON.stringify(inspected, null, 2) + '\n');
@@ -514,7 +541,7 @@ async function main() {
   process.exitCode = hit ? 2 : 0;
 }
 
-main().catch((err) => {
+if (process.argv[1] && path.resolve(process.argv[1]) === fileURLToPath(import.meta.url)) main().catch((err) => {
   process.stderr.write(`内部エラー（${err && err.name ? err.name : 'Error'}）。\n`);
   process.exitCode = 1;
 });

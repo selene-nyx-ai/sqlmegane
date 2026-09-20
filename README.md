@@ -110,6 +110,54 @@ MySQL / PostgreSQL / SQL Server では、同梱パーサで生成文を再解析
 
 注意: 生成した SQL は必ず読み返してから使ってください。候補行数 SELECT は結合後の候補件数の目安で、実際の影響行数ではありません。別名付きの SELECT から作った DELETE は、MySQL では 8.0.16 以降の構文（`DELETE FROM t AS a`）になります。それより前の MySQL では別名を外してください。CLI の `convert` は、生成物の自己検証で danger / warning が出た場合に標準エラーへ表示します（WHERE の無い SELECT から作った DML など）。
 
+## 退避してから変更する（退避 → 変更 → 補償）
+
+「更新文を作る」の下にある、既定で閉じた「退避してから変更する」で、退避表名・退避列・キー列と UPDATE の列／値を指定します。列は SELECT の直接の出力列から明示選択します。`SELECT *` は列を明示した SELECT に変更してください。未入力や非対応形ではコピーを無効化します。接続なしの準備ツールであり、画面から DB を操作しません。
+
+| 方言 | 区分 | 退避時の保護 |
+|---|---|---|
+| PostgreSQL | planned：PostgreSQL 18 で検証予定 | INSERT SELECT と同じ文の `FOR UPDATE OF t`。READ COMMITTED 可 |
+| MySQL 8.0 | reference：公式ドキュメントに基づく参考型紙・実機未検証 | 両表 InnoDB 等、REPEATABLE READ 必須。`FOR UPDATE`、検索・索引・計画に応じ gap / next-key ロック（一意キー完全一致はレコードのみの場合あり） |
+| SQL Server | reference：公式ドキュメントに基づく参考型紙・実機未検証 | `UPDLOCK, HOLDLOCK`。範囲保護、ロック拡大の可能性 |
+| Oracle 19c 以降 | reference：公式ドキュメントに基づく参考型紙・実機未検証 | `LOCK TABLE ... IN EXCLUSIVE MODE`。表全体の書き込みを待機させる（通常 SELECT は可、FOR UPDATE は待機） |
+
+退避は **1 作業 1 新規退避表、開始時に空、追記・再利用禁止**。既定名は `<表名>_bk_<UTC の yyyymmddhhmmss>_<4文字>`。スキーマと引用を保ち、名前の表名部分だけを長さ制限に合わせ短縮します。一意性の保証はありません。同名表があれば空でも使わず作業 ID を変更してください。PostgreSQL は 63 バイト、MySQL は 64 文字、SQL Server は 128 文字、Oracle は `COMPATIBLE >= 12.2` で 128 バイト（それ未満は 30 バイト）です。API の `oracleCompatible: 'legacy'` で 30 バイトを指定できます。
+
+空表作成は属性を完全に複製しません。
+
+| 製品／空表コピー | 継承される属性・制限 |
+|---|---|
+| PostgreSQL CTAS | 制約・索引を継承しない |
+| MySQL CTAS | AUTO_INCREMENT を継承しない。NOT NULL・DEFAULT は継承。式は型が変わる場合あり |
+| Oracle CTAS | 明示 NOT NULL を条件付き継承。PK・FK・索引・既定値は継承しない |
+| SQL Server SELECT INTO | 単純な直接列選択では IDENTITY を継承する（JOIN・UNION・式は例外）。この機能では **明示列定義の CREATE TABLE** を既定にする |
+
+5 段階をそれぞれコピーして対話クライアントで実行し、結果を見て次へ進みます。DDL と A〜D は別の構築経路です。B〜D は同じ接続・同じトランザクションです。
+
+1. **0：準備** — 専用接続、未確定作業なしで新規の空表を作成。列型・精度・照合規則を元表と合わせる。Oracle / MySQL の DDL は暗黙コミット（Oracle は有効な DDL の実行失敗時も実行前コミット）。SQL Server の列定義プレースホルダは人が記入する準備型紙です。
+2. **A：事前検査** — 退避表 0 件、元 SELECT と候補件数、接続設定を確認。psql は autocommit ON＋B の明示 BEGIN。他クライアントは B〜D 間に自動 COMMIT しないこと。MySQL は autocommit=1 / REPEATABLE-READ と両表のエンジンを確認し末尾 ROLLBACK。Oracle は AUTOCOMMIT OFF、末尾 ROLLBACK。SQL Server は IMPLICIT_TRANSACTIONS OFF、既存トランザクションを末尾で ROLLBACK。不合格なら B を貼らない。
+3. **B：退避と検査** — 開始・ロックとコピー・検査。候補件数＝退避件数＝対象キー存在件数、重複 0 行、NULL 0、対応漏れ 0。SQL Server は開始直後 @@TRANCOUNT=1（2 以上なら中止）。キー一覧を最終確認。A は予備確認で、件数一致は集合一致の証明ではありません。退避集合が最終対象です。末尾に終了文はありません。
+4. **C：変更と検査** — 元述語ではなく退避キー全体に固定して変更。DELETE は対象キー 0 件、UPDATE は全キー存在・値の不一致 0。NULL の片側不一致も検査。影響行数は補助証拠（MySQL は変更行数）。末尾に終了文はありません。
+5. **D：終了** — 既定は ROLLBACK。全検査合格後の COMMIT は別の折りたたみ・別コピーで、退避と変更が一緒に確定します。SQL Server は終了後 @@TRANCOUNT=0 を確認。退避表・日時・終了操作を記録します。
+
+SQL エラー・タイムアウト・取消し・検査結果不明は全て不合格。同じ接続でトランザクション継続中なら ROLLBACK し、終了を確認して最初からやり直します。**接続喪失・COMMIT 応答不明は「結果不明」として停止し、再実行・補償は禁止**。サーバーで確定済みなら再接続後の ROLLBACK では取り消せません。元接続の終了を確認し、退避表・対象表・作業記録から確定結果を確認してください。psql の `ON_ERROR_ROLLBACK=on` ではエラー後も後続文が動くため、人が必ず停止します。
+
+「補償 SQL 案（完全復元ではない）」は **条件付き型紙** です。①開始・ロック・事前検査 ②補償 DML＋事後検査 ③終了（ROLLBACK と COMMIT は別コピー）に分けます。UPDATE は全退避キーの存在・1 対 1・作業直後値を確認し、不一致行もロックします。DELETE は不在を確認しますが、不在は行ロックでは守れません。キーを有効な DB 制約で強制し、関係する一意制約は即時検査、SQL Server は IGNORE_DUP_KEY=OFF、重複無視は禁止。検査後の競合は制約エラーで補償単位全体を ROLLBACK します。キー以外の一意制約の検査は人が追記します。復旧列が足りるか、省略列への DEFAULT / NULL が許容されるか、書き戻せない列がないか確認します。`--identity none` は列属性条件だけであり、他方言を検証済みにはしません。`backupSet` は属性を確認できないため補償を常に reference で返します。
+
+対象外：補償 SQL の自動生成（前提を人が確認する型紙のみ）、バッチ実行、一括貼り付け、キー IN 形、複数表、式代入、キー変更、生成列キー、部分補償、列の自動照合、列ごとの書き込み可否管理。識別列・生成列・計算列・rowversion を持つ表の補償は参考のみ。関連表の連鎖変更・トリガー・監査列の副作用は戻りません（別途復旧手順がなければ対象外）。元作業を ROLLBACK したら補償しません。退避先の権限と保管期限を確認し、削除は作業記録と組織の保管期限に従ってください。DROP は生成しません。
+
+保守的な追加制限：副問い合わせ付き述語は全方言で拒否します。改行・バックスラッシュを含む代入文字列、Oracle / SQL Server の TRUE/FALSE は方言・設定依存の解釈を避けるため拒否します。申告更新列の不一致、書き戻し列の包含違反、部分補償の指定にも理由コードを返します。
+
+```sh
+node cli/sqlmegane.mjs convert --to delete --dialect postgres --backup-table t_log_bk --backup-columns id,created_at --key-columns id --stage all -
+node cli/sqlmegane.mjs convert --to update --dialect postgres --backup-columns id,status --key-columns id --set "status='DONE'" --stage change input.sql
+node cli/sqlmegane.mjs template --kind compensate-delete --dialect postgres --identity none
+```
+
+`--stage` は `prepare|precheck|backup|change|rollback|commit|all`。`all` は閲覧用で、一括貼り付け不可のコメントと段階見出しを付けます。拒否は共通 validator の理由コードを stderr に出し終了コード 2。`--json` は `backupSet` の結果そのものです。未対応の述語や値表現は既存の変換にフォールバックしません。
+
+`node tests/run-tests.mjs` は文字列・契約検査。`npm run test:pg` は `SQLMEGANE_PG` 接続文字列がなければ skip、あれば PostgreSQL 18 に接続して生成 SQL を実行します。公開前に実行結果を `business/qa/` に保存し、対話クライアント・切断時の運用・ブラインドテストを確認してください。実 DB 試験未実行の状態では planned の表示を維持します。
+
 ## 型紙
 
 UPDATE、DELETE、INSERT SELECT、UPSERT / MERGE、CREATE TABLE の方言別型紙を入力欄とは別のプレビューで確認できます。型紙の入力箇所は `<table>`、`<column>`、`<value>`、`<condition>`、`<key>`、`<source>` です。これらが SQL の文字列・コメント以外に残っている場合は danger として指摘します。

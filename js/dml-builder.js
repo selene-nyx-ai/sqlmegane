@@ -10,6 +10,11 @@ const REASON_CODES = new Set([
   'cte-unsupported-v1', 'derived-table', 'hierarchical-or-special',
   'lock-clause', 'select-into', 'not-single-select', 'parse-failed',
   'dialect-ambiguous', 'key-not-in-output', 'star-output',
+  'backup-columns-required', 'key-columns-required', 'key-not-in-backup',
+  'update-columns-not-in-backup', 'key-column-assigned', 'duplicate-column',
+  'backup-table-same-as-target', 'backup-name-too-long', 'expression-assignment',
+  'lock-method-undefined', 'unfilled-placeholder', 'insert-columns-not-in-backup',
+  'partial-compensation-unsupported', 'assignment-columns-mismatch',
 ]);
 
 function lex(sql) {
@@ -644,8 +649,149 @@ function applyColumns(updateSql, columns) {
     `SET ${selected.map((c) => `${c.trim()} = <value>`).join(', ')}`);
 }
 
+// All backup entry points use this validator; never fall back to ordinary DML.
+function backupSet(sqlText, options) {
+  const o = options || {}, d = o.dialect || 'generic';
+  const originalSelect = String(sqlText || '');
+  const tier = d === 'postgres' ? 'planned' : 'reference';
+  const T = (key) => backupMessage(key, o.locale);
+  const reasons = [];
+  const add = (code) => { if (!reasons.includes(code)) reasons.push(code); };
+  const fail = () => ({ status: 'unsupported', reasonCode: reasons[0], reasonCodes: reasons,
+    reasonParams: {}, dialectTier: tier, stages: null, compensation: null, warnings: [], originalSelect });
+  if (!['postgres', 'mysql', 'mssql', 'oracle'].includes(d) || (o.shape && o.shape !== 'single')
+      || (d === 'mysql' && o.isolation && !/^repeatable[- ]read$/i.test(o.isolation))) add('lock-method-undefined');
+  if (o.partial || o.compensationWhere || o.where) add('partial-compensation-unsupported');
+  const parsed = convert(originalSelect, { dialect: d });
+  if (parsed.status !== 'ok') for (const code of parsed.reasonCodes) add(code);
+  const columns = Array.isArray(o.backupColumns) ? o.backupColumns : [];
+  const keys = Array.isArray(o.keyColumns) ? o.keyColumns : [];
+  const assignments = Array.isArray(o.assignments) ? o.assignments : [];
+  const assigned = assignments.map((a) => a && a.column);
+  const inserts = o.insertColumns === undefined ? columns : o.insertColumns;
+  const norm = (s) => {
+    const text = String(s || '');
+    if (isQuotedIdentifier(text)) {
+      const close = text[0] === '[' ? ']' : text[0];
+      return text.slice(1, -1).split(close + close).join(close);
+    }
+    return d === 'postgres' ? text.toLowerCase() : d === 'oracle' ? text.toUpperCase() : text;
+  };
+  const includes = (list, c) => list.some((x) => norm(x) === norm(c));
+  const declared = o.updateColumns || o.columns;
+  if (Array.isArray(declared) && declared.length && (declared.length !== assigned.length || declared.some((c) => !includes(assigned, c)))) add('assignment-columns-mismatch');
+  if (!columns.length || columns.includes('*')) add('backup-columns-required');
+  if (!keys.length) add('key-columns-required');
+  if (keys.some((k) => !includes(columns, k))) add('key-not-in-backup');
+  if (o.to === 'update' && assigned.some((c) => !includes(columns, c))) add('update-columns-not-in-backup');
+  if (o.to === 'update' && assigned.some((c) => includes(keys, c))) add('key-column-assigned');
+  if (!Array.isArray(inserts) || !inserts.length || inserts.some((c) => !includes(columns, c)) || keys.some((k) => !includes(inserts, k))) add('insert-columns-not-in-backup');
+  for (const list of [columns, keys, assigned, Array.isArray(inserts) ? inserts : []]) {
+    // Case-insensitive duplicates are rejected conservatively even for unknown collations.
+    if (new Set(list.map((c) => norm(c).toLowerCase())).size !== list.length) add('duplicate-column');
+    if (list.some((c) => !backupIdentifier(c, false))) add('unfilled-placeholder');
+  }
+  if (!['update', 'delete'].includes(o.to) || (o.to === 'update' && !assignments.length)) add('unfilled-placeholder');
+  const literal = /^(?:[+-]?(?:\d+(?:\.\d*)?|\.\d+)(?:e[+-]?\d+)?|'(?:[^']|'')*'|NULL|TRUE|FALSE)$/i;
+  for (const a of assignments) {
+    const value = String(a && a.value != null ? a.value : '').trim();
+    if (!value || /<[^>]+>/.test(value)) add('unfilled-placeholder');
+    else if (!literal.test(value) || /[\\\r\n]/.test(value)) add('expression-assignment');
+    else if (['mssql', 'oracle'].includes(d) && /^(TRUE|FALSE)$/i.test(value)) add('expression-assignment');
+  }
+  if (/<[A-Za-z_][^>]*>/.test(originalSelect)) add('unfilled-placeholder');
+  if (parsed.status !== 'ok') return fail();
+  // Nested queries / qualified multi-part predicates need separate lock analysis.
+  const pt = lex(parsed.where);
+  const inputTokens = lex(originalSelect);
+  if (inputTokens.some((t, i) => t.kind !== 'string' && (['?', '@', '&'].includes(t.text) || (t.text === ':' && inputTokens[i - 1]?.text !== ':' && inputTokens[i + 1]?.text !== ':') || /^\$\d+$/.test(t.text)))) add('unfilled-placeholder');
+  if (pt.some((t) => ['SELECT', 'EXISTS'].includes(t.upper))) add('lock-method-undefined');
+  const table = parsed.target.table;
+  const backupTable = o.backupTable === undefined ? backupName(table, d, o) : String(o.backupTable).trim();
+  if (!backupIdentifier(backupTable, true)) add('unfilled-placeholder');
+  const tableParts = (s) => lex(s).filter(isIdentifier).map((t) => norm(t.text));
+  const tp = tableParts(table), bp = tableParts(backupTable);
+  if (tp.join('.') === bp.join('.') || (tp.at(-1) === bp.at(-1) && (tp.length === 1 || bp.length === 1))) add('backup-table-same-as-target');
+  const limit = d === 'mysql' ? 64 : d === 'postgres' ? 63 : d === 'oracle' && o.oracleCompatible === 'legacy' ? 30 : 128;
+  if (!backupTable || bp.some((p) => backupLength(p, d) > limit)) add('backup-name-too-long');
+  if (reasons.length) return fail();
+  let predicate = parsed.where.replace(/^WHERE\s+/i, '') || '1 = 1';
+  const qualifier = parsed.target.alias || lex(table).filter(isIdentifier).at(-1).text;
+  predicate = replaceAlias(predicate, qualifier, 't');
+  if (lex(predicate).some((tk, i, ts) => tk.text === '.' && ts[i + 2] && ts[i + 2].text === '.')) { add('lock-method-undefined'); return fail(); }
+  const join = keys.map((k) => `t.${k} = b.${k}`).join(' AND ');
+  const exists = `EXISTS (SELECT 1 FROM ${backupTable} b WHERE ${join})`;
+  const fixed = keys.length === 1 ? `t.${keys[0]} IN (SELECT b.${keys[0]} FROM ${backupTable} b)`
+    : d === 'mssql' ? exists : `(${keys.map((k) => `t.${k}`).join(', ')}) IN (SELECT ${keys.map((k) => `b.${k}`).join(', ')} FROM ${backupTable} b)`;
+  const missing = `SELECT COUNT(*) AS missing_keys FROM ${backupTable} b WHERE NOT EXISTS (SELECT 1 FROM ${table} t WHERE ${join});`;
+  const present = `SELECT COUNT(*) AS present_keys FROM ${table} t WHERE ${exists};`;
+  const duplicate = `SELECT ${keys.join(', ')}, COUNT(*) FROM ${backupTable} GROUP BY ${keys.join(', ')} HAVING COUNT(*) > 1;`;
+  const nullKeys = `SELECT COUNT(*) AS null_keys FROM ${backupTable} b WHERE ${keys.map((k) => `b.${k} IS NULL`).join(' OR ')};`;
+  const count = `SELECT COUNT(*) AS backup_count FROM ${backupTable};`;
+  const mismatch = assignments.map((a) => backupMismatch(d, `t.${a.column}`, String(a.value).trim())).join(' OR ');
+  const stage = (name, sql, pass = name) => {
+    const title = T(`${name}.title`), passCondition = T(`${pass}.pass`), onFail = T(`${name}.fail`);
+    return { title, sql: `-- ${T(tier)}\n-- ${title}\n-- ${passCondition}\n-- ${onFail}\n-- ${T('errors')}\n${sql}\n`, passCondition, onFail };
+  };
+  const start = d === 'postgres' ? 'BEGIN;' : d === 'mysql' ? 'START TRANSACTION;' : d === 'mssql' ? 'BEGIN TRANSACTION;\nSELECT @@TRANCOUNT AS transaction_count;' : '';
+  const lock = d === 'oracle' ? `LOCK TABLE ${table} IN EXCLUSIVE MODE;\n` : '';
+  const hint = d === 'mssql' ? ' WITH (UPDLOCK, HOLDLOCK)' : '';
+  const suffix = d === 'postgres' ? ' FOR UPDATE OF t' : d === 'mysql' ? ' FOR UPDATE' : '';
+  const backup = `${start}\n-- ${T('locks')}\n-- ${T('countNotice')}\n${lock}INSERT INTO ${backupTable} (${columns.join(', ')}) SELECT ${columns.map((c) => `t.${c}`).join(', ')} FROM ${table} t${hint} WHERE ${predicate}${suffix};\n${count}\n${duplicate}\n${nullKeys}\n${missing}\n${present}\nSELECT ${keys.map((k) => `b.${k}`).join(', ')} FROM ${backupTable} b ORDER BY ${keys.map((k) => `b.${k}`).join(', ')};`;
+  const set = assignments.map((a) => `${d === 'mysql' ? 't.' : ''}${a.column} = ${String(a.value).trim()}`).join(', ');
+  const change = o.to === 'delete'
+    ? (['mssql', 'mysql'].includes(d) ? `DELETE t FROM ${table} t WHERE ${fixed};` : `DELETE FROM ${table} t WHERE ${fixed};`)
+    : d === 'mssql' ? `UPDATE t SET ${set} FROM ${table} t WHERE ${fixed};` : `UPDATE ${table} t SET ${set} WHERE ${fixed};`;
+  const affected = d === 'mysql' ? `SELECT ROW_COUNT() AS affected_rows;\n-- ${T('affected')}` : d === 'mssql' ? 'SELECT @@ROWCOUNT AS affected_rows;' : `-- ${T('affected')}`;
+  const preStart = d === 'mysql' ? 'SELECT @@autocommit, @@transaction_isolation;' : d === 'oracle' ? 'SHOW AUTOCOMMIT' : d === 'mssql' ? 'SET IMPLICIT_TRANSACTIONS OFF;' : '';
+  const preEnd = d === 'mssql' ? 'IF @@TRANCOUNT > 0 ROLLBACK TRANSACTION;' : ['mysql', 'oracle'].includes(d) ? 'ROLLBACK;' : '';
+  const end = (action) => stage(action.toLowerCase(), `-- ${T('unknown')}\n-- ${backupTable} | ${new Date(o.now === undefined ? Date.now() : o.now).toISOString()} | ${action}\n${action}${d === 'mssql' ? ' TRANSACTION' : ''};${d === 'mssql' ? '\nSELECT @@TRANCOUNT AS transaction_count;' : ''}`);
+  const finish = { rollback: end('ROLLBACK'), commit: end('COMMIT') };
+  const context = { ...o, table, backupTable, keys, columns, assignments, inserts, join, exists, missing, present, duplicate, nullKeys, count, mismatch, start, lock, hint, suffix, locale: o.locale };
+  const Templates = globalThis.SQLMeganeTemplates;
+  const template = Templates.get(`compensate-${o.to}`, d, { ...context, identity: 'unknown', bare: true });
+  const parts = template.split(/^-- ===== [123]\/3 .* =====\r?\n/m);
+  const ends = parts[3].split('-- ----- COMMIT -----\n');
+  const compensation = { tier: 'reference', precheck: stage('compPrecheck', parts[0] + parts[1]), apply: stage('compApply', parts[2]),
+    finish: { rollback: stage('rollback', ends[0]), commit: stage('commit', ends[1].replace(/^-- (COMMIT.*|SELECT @@TRANCOUNT.*)$/gm, '$1'), 'compCommit') } };
+  return { status: 'ok', reasonCode: null, reasonCodes: [], reasonParams: {}, dialectTier: tier, backupTable,
+    stages: { prepare: stage('prepare', Templates.get('backup-table', d, { ...context, bare: true })),
+      precheck: stage('precheck', `-- ${T('scope')}\n-- ${globalThis.SQLMeganeI18n.messages[o.locale === 'en' ? 'en' : 'ja']['dml.warning.key-uniqueness']}\n-- ${T('connection')}\n-- ${T(`connection.${d}`)}\n${preStart}\nSELECT COUNT(*) AS backup_count FROM ${backupTable};\n${parsed.original}\n${parsed.countSelect}\n${preEnd}`),
+      backup: stage('backup', backup), change: stage('change', `${change}\n${affected}\n${o.to === 'delete' ? present : `${missing}\nSELECT COUNT(*) AS mismatches FROM ${table} t WHERE ${exists} AND (${mismatch});`}`), finish },
+    compensation, warnings: [globalThis.SQLMeganeI18n.messages[o.locale === 'en' ? 'en' : 'ja']['dml.warning.key-uniqueness'], T('scope'), T('countNotice')], originalSelect };
+}
+
+function backupMessage(key, locale) {
+  return globalThis.SQLMeganeI18n.messages[locale === 'en' ? 'en' : 'ja'][`dml.backup.${key}`];
+}
+function backupIdentifier(value, qualified) {
+  if (typeof value !== 'string' || !value.trim()) return false;
+  const ident = '(?:[A-Za-z_\\u0080-\\uFFFF][A-Za-z0-9_$#\\u0080-\\uFFFF]*|"(?:[^"]|"")+"|`(?:[^`]|``)+`|\\[(?:[^\\]]|\\]\\])+\\])';
+  return new RegExp(`^${ident}${qualified ? `(?:\\s*\\.\\s*${ident})*` : ''}$`).test(value) && !/[\r\n]/.test(value);
+}
+function backupLength(s, dialect) { return ['postgres', 'oracle'].includes(dialect) ? new TextEncoder().encode(s).length : [...s].length; }
+function backupName(table, dialect, o = {}) {
+  const tokens = lex(table).filter(isIdentifier), last = tokens.at(-1);
+  if (!last) return '';
+  const quoted = isQuotedIdentifier(last.text), open = last.text[0], close = open === '[' ? ']' : open;
+  let base = quoted ? last.text.slice(1, -1).split(close + close).join(close) : last.text;
+  const stamp = new Date(o.now === undefined ? Date.now() : o.now).toISOString().replace(/[-:T]/g, '').slice(0, 14);
+  const id = o.workId === undefined ? Math.random().toString(36).slice(2, 6).padEnd(4, '0') : String(o.workId);
+  if (!/^[A-Za-z0-9]{4}$/.test(id)) return '';
+  const tail = `_bk_${stamp}_${id}`, limit = dialect === 'postgres' ? 63 : dialect === 'mysql' ? 64 : dialect === 'oracle' && o.oracleCompatible === 'legacy' ? 30 : 128;
+  while (base && backupLength(base + tail, dialect) > limit) base = [...base].slice(0, -1).join('');
+  if (!base) return '';
+  const name = base + tail;
+  return table.slice(0, last.start) + (quoted ? open + name.split(close).join(close + close) + close : name);
+}
+function backupMismatch(d, left, right) {
+  if (d === 'postgres') return `${left} IS DISTINCT FROM ${right}`;
+  if (d === 'mysql') return `NOT (${left} <=> ${right})`;
+  return `((${left} IS NOT NULL AND ${right} IS NOT NULL AND ${left} <> ${right}) OR (${left} IS NULL AND ${right} IS NOT NULL) OR (${left} IS NOT NULL AND ${right} IS NULL))`;
+}
+
 globalThis.SQLMeganeDmlBuilder = {
-  convert, inspect, convertByKey, applyColumns, REASON_CODES,
+  convert, inspect, convertByKey, applyColumns, backupSet, backupName, backupMismatch, backupMessage, REASON_CODES,
   _internal: { lex, syntaxCheck, innerSelect, byKeyInvariants, outputColumnsFromTokens, collectAstTables },
 };
 })();
