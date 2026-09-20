@@ -3131,6 +3131,17 @@ test('trailing line comment in the original SELECT does not swallow generated cl
   // A `--` inside a string literal on the last line is not a comment; keep the terminator on the same line.
   const literal = DmlBuilder.convert("SELECT id FROM t_log WHERE note = 'a -- b'", { dialect: 'postgres' });
   assert.match(literal.delete, /'a -- b';$/);
+  // Codex review: multi-line strings and block comments must not hide a real trailing line comment.
+  const multi = DmlBuilder.convert("SELECT id FROM demo WHERE note = 'a\nb' -- 'VIP'", { dialect: 'postgres' });
+  assert.match(multi.delete, /-- 'VIP'\n;$/);
+  const blockThenLine = DmlBuilder.convert("SELECT id FROM demo WHERE id = 1 /* ' */ -- 'VIP'", { dialect: 'postgres' });
+  assert.match(blockThenLine.delete, /-- 'VIP'\n;$/);
+  const byKeyMulti = DmlBuilder.convertByKey("WITH cs AS (SELECT user_id FROM orders WHERE total > 1)\nSELECT u.user_id FROM cs JOIN users u ON u.user_id = cs.user_id\nWHERE u.note = 'a\nb' -- 'VIP'", { dialect: 'postgres', targetTable: 'orders', outputKey: 'user_id' });
+  assert.match(byKeyMulti.delete, /-- 'VIP'\n\) sqlmegane_src\);$/);
+  // Not comments: Oracle identifier with #, a block comment containing --, MySQL # only for MySQL.
+  assert.match(DmlBuilder.convert('SELECT id FROM demo WHERE code# = 1', { dialect: 'oracle' }).delete, /code# = 1;$/);
+  assert.match(DmlBuilder.convert('SELECT id FROM demo WHERE id = 1 /* -- VIP */', { dialect: 'postgres' }).delete, /\*\/;$/);
+  assert.match(DmlBuilder.convert('SELECT id FROM demo WHERE id = 1 # VIP', { dialect: 'mysql' }).delete, /# VIP\n;$/);
   // Backup stage A reuses the single-table count SELECT, so it must also terminate correctly.
   const backup = buildBackup({}, "SELECT id, value FROM demo WHERE value = 'old' AND id > 0");
   assert.equal(backup.status, 'ok'); assert.match(backup.stages.precheck.sql, /AND id > 0;\n/);

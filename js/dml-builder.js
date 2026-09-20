@@ -435,7 +435,7 @@ function convertByKey(sqlText, options) {
   const keyHead = `SELECT ${hint}${outputKey} FROM (`;
   // If the original SELECT ends with a line comment (e.g. `WHERE x <= 0.2 -- VIP`), close the derived
   // table on a new line; otherwise `) sqlmegane_src)` would be swallowed by the comment.
-  const predicate = `${targetKey} IN (${keyHead}${body}${endsWithLineComment(body) ? '\n' : ''}) sqlmegane_src)`;
+  const predicate = `${targetKey} IN (${keyHead}${body}${endsWithLineComment(body, dialect) ? '\n' : ''}) sqlmegane_src)`;
   const bodies = {
     update: `UPDATE ${targetTable} SET <column> = <value> WHERE ${predicate};`,
     delete: `DELETE FROM ${targetTable} WHERE ${predicate};`,
@@ -606,7 +606,7 @@ function convert(sqlText, options) {
     : `DELETE FROM ${target.table}${deleteAlias}`;
   const suffix = whereClause ? ` ${whereClause}` : '';
   // A WHERE that ends with a line comment would swallow the terminator; put `;` on its own line then.
-  const terminator = endsWithLineComment(suffix) ? '\n;' : ';';
+  const terminator = endsWithLineComment(suffix, dialect) ? '\n;' : ';';
   const update = `UPDATE ${updateTarget} SET <column> = <value>${suffix}${terminator}`;
   const del = `${deleteHead}${suffix}${terminator}`;
   const countSelect = `SELECT COUNT(*) FROM ${target.table}${selectAlias}${suffix}${terminator}`;
@@ -813,11 +813,41 @@ function hasAlternativeQuote(sql) {
   }
   return false;
 }
-// True when the last line of `text` carries a line comment (-- or #) outside string literals / quoted identifiers.
-function endsWithLineComment(text) {
-  const last = String(text || '').trimEnd().split('\n').pop() || '';
-  const stripped = last.replace(/'(?:[^']|'')*'|"(?:[^"]|"")*"|`(?:[^`]|``)*`|\[(?:[^\]]|\]\])*\]/g, '');
-  return /--|#/.test(stripped);
+// True when `text` (trailing whitespace ignored) ends inside a line comment: `--` for every dialect, `#` for MySQL.
+// Scans the whole text so that multi-line strings, dollar quotes, quoted identifiers, block comments and
+// Oracle q'…' alternative quotes cannot hide or fake a trailing line comment.
+function endsWithLineComment(text, dialect) {
+  const s = String(text || '').trimEnd();
+  const hashComments = dialect === 'mysql';
+  let i = 0, inLine = false;
+  const skipTo = (close) => { const at = s.indexOf(close, i); i = at < 0 ? s.length : at + close.length; };
+  while (i < s.length) {
+    const c = s[i], n = s[i + 1] || '';
+    if (inLine) { if (c === '\n') inLine = false; i++; continue; }
+    if (c === '-' && n === '-') { inLine = true; i += 2; continue; }
+    if (hashComments && c === '#') { inLine = true; i++; continue; }
+    if (c === '/' && n === '*') { i += 2; skipTo('*/'); continue; }
+    if (/[qQ]/.test(c) && n === "'" && (i === 0 || !/[A-Za-z0-9_$#]/.test(s[i - 1]) || (/[nN]/.test(s[i - 1]) && (i === 1 || !/[A-Za-z0-9_$#]/.test(s[i - 2]))))) {
+      const open = s[i + 2] || '', close = { '[': ']', '(': ')', '{': '}', '<': '>' }[open] || open;
+      i += 3; skipTo(close + "'"); continue;
+    }
+    if (c === "'") {
+      i++;
+      while (i < s.length) { if (s[i] === "'" && s[i + 1] === "'") { i += 2; continue; } if (s[i++] === "'") break; }
+      continue;
+    }
+    if (c === '$') {
+      const m = s.slice(i).match(/^\$[A-Za-z_0-9]*\$/);
+      if (m) { i += m[0].length; skipTo(m[0]); continue; }
+    }
+    if (c === '"' || c === '`' || c === '[') {
+      const close = c === '[' ? ']' : c; i++;
+      while (i < s.length) { if (s[i] === close && s[i + 1] === close) { i += 2; continue; } if (s[i++] === close) break; }
+      continue;
+    }
+    i++;
+  }
+  return inLine;
 }
 function backupMessage(key, locale) {
   return globalThis.SQLMeganeI18n.messages[locale === 'en' ? 'en' : 'ja'][`dml.backup.${key}`];
