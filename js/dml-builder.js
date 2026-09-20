@@ -433,9 +433,9 @@ function convertByKey(sqlText, options) {
   const hint = dialect === 'mysql' ? '/*+ NO_MERGE(sqlmegane_src) */ ' : '';
   if (hint) warnings.push('mysql-no-merge');
   const keyHead = `SELECT ${hint}${outputKey} FROM (`;
-  // If the original SELECT ends with a line comment (e.g. `WHERE x <= 0.2 -- VIP`), close the derived
-  // table on a new line; otherwise `) sqlmegane_src)` would be swallowed by the comment.
-  const predicate = `${targetKey} IN (${keyHead}${body}${endsWithLineComment(body, dialect) ? '\n' : ''}) sqlmegane_src)`;
+  // The derived table always closes on its own line: the original SELECT may end with a line comment
+  // (e.g. `WHERE x <= 0.2 -- VIP`), which would otherwise swallow `) sqlmegane_src)`.
+  const predicate = `${targetKey} IN (${keyHead}${body.trimEnd()}\n) sqlmegane_src)`;
   const bodies = {
     update: `UPDATE ${targetTable} SET <column> = <value> WHERE ${predicate};`,
     delete: `DELETE FROM ${targetTable} WHERE ${predicate};`,
@@ -813,59 +813,12 @@ function hasAlternativeQuote(sql) {
   }
   return false;
 }
-// True when `text` (trailing whitespace ignored) ends inside a line comment: `--` for every dialect, `#` for MySQL.
-// Scans the whole text so that multi-line strings, dollar quotes, quoted identifiers, block comments and
-// Oracle q'…' alternative quotes cannot hide or fake a trailing line comment.
+// Over-approximation: true when the last line of `text` contains `--` (or `#` for MySQL) anywhere, even inside a
+// string literal. A real trailing line comment always contains the marker on the last line, so this can never miss
+// one; a false positive only adds a harmless newline before the generated terminator.
 function endsWithLineComment(text, dialect) {
-  const s = String(text || '').trimEnd();
-  const isMysql = dialect === 'mysql', isPostgres = dialect === 'postgres';
-  let i = 0, inLine = false;
-  const skipTo = (close) => { const at = s.indexOf(close, i); i = at < 0 ? s.length : at + close.length; };
-  // MySQL string literals ('…' and "…") use backslash escapes unless NO_BACKSLASH_ESCAPES is set; PostgreSQL E'…' strings too.
-  const skipString = (quote, backslashes = isMysql) => {
-    i++;
-    while (i < s.length) {
-      if (backslashes && s[i] === '\\') { i += 2; continue; }
-      if (s[i] === quote && s[i + 1] === quote) { i += 2; continue; }
-      if (s[i++] === quote) break;
-    }
-  };
-  while (i < s.length) {
-    const c = s[i], n = s[i + 1] || '';
-    if (inLine) { if (c === '\n') inLine = false; i++; continue; }
-    if (c === '-' && n === '-') { inLine = true; i += 2; continue; }
-    if (isMysql && c === '#') { inLine = true; i++; continue; }
-    if (c === '/' && n === '*') {
-      // PostgreSQL and SQL Server block comments nest; MySQL / Oracle end at the first */.
-      let depth = 1; i += 2;
-      while (i < s.length && depth > 0) {
-        if ((isPostgres || dialect === 'mssql') && s[i] === '/' && s[i + 1] === '*') { depth++; i += 2; continue; }
-        if (s[i] === '*' && s[i + 1] === '/') { depth--; i += 2; continue; }
-        i++;
-      }
-      continue;
-    }
-    if (/[qQ]/.test(c) && n === "'" && (i === 0 || !/[A-Za-z0-9_$#]/.test(s[i - 1]) || (/[nN]/.test(s[i - 1]) && (i === 1 || !/[A-Za-z0-9_$#]/.test(s[i - 2]))))) {
-      const open = s[i + 2] || '', close = { '[': ']', '(': ')', '{': '}', '<': '>' }[open] || open;
-      i += 3; skipTo(close + "'"); continue;
-    }
-    // PostgreSQL E'…' (escape string) uses backslash escapes; must be a token start (not part of an identifier).
-    if (isPostgres && /[eE]/.test(c) && n === "'" && (i === 0 || !/[A-Za-z0-9_$\u0080-￿]/.test(s[i - 1]))) { i++; skipString("'", true); continue; }
-    if (c === "'") { skipString("'"); continue; }
-    // Dollar quoting is PostgreSQL only, and `$` inside an identifier (code$tag$, code$$tag$) is not a quote start.
-    if (isPostgres && c === '$' && (i === 0 || !/[A-Za-z0-9_$\u0080-￿]/.test(s[i - 1]))) {
-      const m = s.slice(i).match(/^\$[A-Za-z_0-9]*\$/);
-      if (m) { i += m[0].length; skipTo(m[0]); continue; }
-    }
-    if (isMysql && c === '"') { skipString('"'); continue; }
-    if (c === '"' || c === '`' || c === '[') {
-      const close = c === '[' ? ']' : c; i++;
-      while (i < s.length) { if (s[i] === close && s[i + 1] === close) { i += 2; continue; } if (s[i++] === close) break; }
-      continue;
-    }
-    i++;
-  }
-  return inLine;
+  const last = String(text || '').trimEnd().split('\n').pop() || '';
+  return last.includes('--') || (dialect === 'mysql' && last.includes('#'));
 }
 function backupMessage(key, locale) {
   return globalThis.SQLMeganeI18n.messages[locale === 'en' ? 'en' : 'ja'][`dml.backup.${key}`];

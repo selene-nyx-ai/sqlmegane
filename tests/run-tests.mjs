@@ -2734,7 +2734,7 @@ test('by-key: NULL と再評価の warning を必ず返す', () => {
 });
 test('by-key: MySQL の更新対象自己参照も二重派生表になる', () => {
   const r = DmlBuilder.convertByKey('SELECT id FROM t WHERE active = 0', { dialect: 'mysql', targetTable: 't', outputKey: 'id' });
-  assert.ok(r.delete.includes('DELETE FROM t WHERE id IN (SELECT /*+ NO_MERGE(sqlmegane_src) */ id FROM (SELECT id FROM t WHERE active = 0) sqlmegane_src)'), r.delete);
+  assert.ok(r.delete.includes('DELETE FROM t WHERE id IN (SELECT /*+ NO_MERGE(sqlmegane_src) */ id FROM (SELECT id FROM t WHERE active = 0\n) sqlmegane_src)'), r.delete);
 });
 test('by-key: 引用識別子は大小文字を区別する', () => {
   const bad = DmlBuilder.convertByKey('SELECT id AS "Product_ID" FROM t', { dialect: 'postgres', targetTable: 't', outputKey: '"product_id"' });
@@ -2842,7 +2842,7 @@ test('by-key: SQL Server では WITH 句を文頭へ移し、派生表には最�
   const r = DmlBuilder.convertByKey(sql, { dialect: 'mssql', targetTable: 'orders', outputKey: 'id' });
   assert.equal(r.status, 'ok', JSON.stringify(r.reasonCodes));
   assert.ok(r.delete.startsWith('WITH recent AS ('), r.delete);
-  assert.ok(r.delete.includes('DELETE FROM orders WHERE id IN (SELECT id FROM (SELECT o.id, o.total FROM orders o JOIN recent r ON r.id = o.id WHERE o.total > 100) sqlmegane_src);'), r.delete);
+  assert.ok(r.delete.includes('DELETE FROM orders WHERE id IN (SELECT id FROM (SELECT o.id, o.total FROM orders o JOIN recent r ON r.id = o.id WHERE o.total > 100\n) sqlmegane_src);'), r.delete);
   assert.ok(!r.delete.includes('(WITH'), r.delete);
   assert.ok(r.warnings.includes('mssql-cte-hoisted'));
   assert.equal(r.equivalence, 'proven', JSON.stringify(r.invariants));
@@ -2853,7 +2853,7 @@ test('by-key: SQL Server では WITH 句を文頭へ移し、派生表には最�
 });
 test('by-key: MySQL では NO_MERGE ヒントを付け、warning を返す', () => {
   const r = DmlBuilder.convertByKey('SELECT id FROM t WHERE active = 0', { dialect: 'mysql', targetTable: 't', outputKey: 'id' });
-  assert.ok(r.delete.includes('DELETE FROM t WHERE id IN (SELECT /*+ NO_MERGE(sqlmegane_src) */ id FROM (SELECT id FROM t WHERE active = 0) sqlmegane_src);'), r.delete);
+  assert.ok(r.delete.includes('DELETE FROM t WHERE id IN (SELECT /*+ NO_MERGE(sqlmegane_src) */ id FROM (SELECT id FROM t WHERE active = 0\n) sqlmegane_src);'), r.delete);
   assert.ok(r.warnings.includes('mysql-no-merge'));
   assert.equal(r.equivalence, 'proven', JSON.stringify(r.invariants));
   assert.equal(r.syntaxCheck.delete.ok, true, JSON.stringify(r.syntaxCheck.delete));
@@ -3130,7 +3130,7 @@ test('trailing line comment in the original SELECT does not swallow generated cl
   for (const s of [single.delete, single.update, single.countSelect]) assert.match(s, /-- VIP\n;$/);
   // A `--` inside a string literal on the last line is not a comment; keep the terminator on the same line.
   const literal = DmlBuilder.convert("SELECT id FROM t_log WHERE note = 'a -- b'", { dialect: 'postgres' });
-  assert.match(literal.delete, /'a -- b';$/);
+  assert.match(literal.delete, /'a -- b'\n;$/); // over-approximation: harmless newline, never a miss
   // Codex review: multi-line strings and block comments must not hide a real trailing line comment.
   const multi = DmlBuilder.convert("SELECT id FROM demo WHERE note = 'a\nb' -- 'VIP'", { dialect: 'postgres' });
   assert.match(multi.delete, /-- 'VIP'\n;$/);
@@ -3140,7 +3140,7 @@ test('trailing line comment in the original SELECT does not swallow generated cl
   assert.match(byKeyMulti.delete, /-- 'VIP'\n\) sqlmegane_src\);$/);
   // Not comments: Oracle identifier with #, a block comment containing --, MySQL # only for MySQL.
   assert.match(DmlBuilder.convert('SELECT id FROM demo WHERE code# = 1', { dialect: 'oracle' }).delete, /code# = 1;$/);
-  assert.match(DmlBuilder.convert('SELECT id FROM demo WHERE id = 1 /* -- VIP */', { dialect: 'postgres' }).delete, /\*\/;$/);
+  assert.match(DmlBuilder.convert('SELECT id FROM demo WHERE id = 1 /* -- VIP */', { dialect: 'postgres' }).delete, /\*\/\n;$/);
   assert.match(DmlBuilder.convert('SELECT id FROM demo WHERE id = 1 # VIP', { dialect: 'mysql' }).delete, /# VIP\n;$/);
   // Codex review round 2: $ inside identifiers, MySQL backslash escapes, nested block comments (PostgreSQL).
   const dollarIdent = DmlBuilder.convertByKey('SELECT id FROM demo WHERE code$tag$ = 1 -- VIP', { dialect: 'postgres', targetTable: 'demo', outputKey: 'id' });
@@ -3153,6 +3153,13 @@ test('trailing line comment in the original SELECT does not swallow generated cl
   assert.match(nested.delete, /-- VIP\n;$/);
   // MySQL / Oracle block comments end at the first */ (the rest is not a comment).
   assert.match(DmlBuilder.convert("SELECT id FROM demo WHERE id = 1 /* a /* b */ AND id = 1", { dialect: 'mysql' }).delete, /AND id = 1;$/);
+  // Codex review round 4: settings-dependent string syntax cannot fool an over-approximation.
+  for (const [sql, dialect] of [["SELECT id FROM demo WHERE ARRAY[']'] IS NOT NULL -- VIP", 'postgres'], ["SELECT id FROM demo WHERE note = $日本$'$日本$ -- VIP", 'postgres'], ["SELECT id FROM demo WHERE note = 'a\\' -- VIP", 'mysql'], ["SELECT id FROM demo WHERE note = 'a\\'b' -- VIP", 'postgres']]) {
+    const r = DmlBuilder.convertByKey(sql, { dialect, targetTable: 'demo', outputKey: 'id' });
+    if (r.status === 'ok') assert.match(r.delete, /-- VIP\n\) sqlmegane_src\);$/, sql);
+    const c = DmlBuilder.convert(sql, { dialect });
+    if (c.status === 'ok') assert.match(c.delete, /-- VIP\n;$/, sql);
+  }
   // Codex review round 3: `$$` inside identifiers, PostgreSQL E'…' escape strings, SQL Server nested comments.
   const doubleDollar = DmlBuilder.convertByKey('SELECT id FROM demo WHERE code$$tag$ = 1 -- VIP', { dialect: 'postgres', targetTable: 'demo', outputKey: 'id' });
   assert.match(doubleDollar.delete, /-- VIP\n\) sqlmegane_src\);$/);
