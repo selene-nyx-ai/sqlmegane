@@ -85,7 +85,7 @@ Open the collapsed **Back up before changing** section below the SELECT converte
 
 | Dialect | Tier | Protection during backup |
 |---|---|---|
-| PostgreSQL | planned: validation on PostgreSQL 18 pending | INSERT SELECT with `FOR UPDATE OF t` in the same statement; READ COMMITTED supported |
+| PostgreSQL | verified: 13 live-database checks passed on PostgreSQL 18.3 (2026-09-20, `npm run test:pg`) | INSERT SELECT with `FOR UPDATE OF t` in the same statement; READ COMMITTED supported |
 | MySQL 8.0 | reference: based on official documentation, not database-tested | Both tables must use transactional engines such as InnoDB; REPEATABLE READ required. `FOR UPDATE` takes record and, depending on search/index/plan, gap or next-key locks; exact unique-key lookups may take only record locks |
 | SQL Server | reference: based on official documentation, not database-tested | `UPDLOCK, HOLDLOCK`, including range protection and possible lock escalation |
 | Oracle 19c+ | reference: based on official documentation, not database-tested | `LOCK TABLE ... IN EXCLUSIVE MODE` blocks writes to the whole table; ordinary reads can continue, FOR UPDATE waits |
@@ -123,7 +123,7 @@ node cli/sqlmegane.mjs template --kind compensate-delete --dialect postgres --id
 
 `--stage` accepts `prepare|precheck|backup|change|rollback|commit|all`. `all` is for review, begins with a warning against pasting everything at once and separates the stages with headings. Rejections use the shared validator, print reason codes to stderr and exit with code 2. `--json` returns the exact `backupSet` result. Unsupported inputs never fall back to ordinary conversion.
 
-`node tests/run-tests.mjs` checks generated strings and contracts. `npm run test:pg` skips without a `SQLMEGANE_PG` connection string; otherwise it runs generated SQL on PostgreSQL 18. Before release, save results under `business/qa/`, check interactive clients and disconnection procedures, and perform the blind review. Retain the planned tier until database validation is complete.
+`node tests/run-tests.mjs` checks generated strings and contracts. `npm run test:pg` skips without a `SQLMEGANE_PG` connection string; otherwise it runs generated SQL on PostgreSQL 18. 13 checks passed on PostgreSQL 18.3 on 2026-09-20 (see tests/pg-smoke.mjs). psql `ON_ERROR_ROLLBACK`, the NOWAIT failure procedure, and disconnection / unknown COMMIT outcomes cannot be automated; follow the operating notes above.
 
 ## Templates
 

@@ -116,7 +116,7 @@ MySQL / PostgreSQL / SQL Server では、同梱パーサで生成文を再解析
 
 | 方言 | 区分 | 退避時の保護 |
 |---|---|---|
-| PostgreSQL | planned：PostgreSQL 18 で検証予定 | INSERT SELECT と同じ文の `FOR UPDATE OF t`。READ COMMITTED 可 |
+| PostgreSQL | verified：PostgreSQL 18.3 で実 DB 試験 13 項目に合格（2026-09-20、`npm run test:pg`） | INSERT SELECT と同じ文の `FOR UPDATE OF t`。READ COMMITTED 可 |
 | MySQL 8.0 | reference：公式ドキュメントに基づく参考型紙・実機未検証 | 両表 InnoDB 等、REPEATABLE READ 必須。`FOR UPDATE`、検索・索引・計画に応じ gap / next-key ロック（一意キー完全一致はレコードのみの場合あり） |
 | SQL Server | reference：公式ドキュメントに基づく参考型紙・実機未検証 | `UPDLOCK, HOLDLOCK`。範囲保護、ロック拡大の可能性 |
 | Oracle 19c 以降 | reference：公式ドキュメントに基づく参考型紙・実機未検証 | `LOCK TABLE ... IN EXCLUSIVE MODE`。表全体の書き込みを待機させる（通常 SELECT は可、FOR UPDATE は待機） |
@@ -156,7 +156,7 @@ node cli/sqlmegane.mjs template --kind compensate-delete --dialect postgres --id
 
 `--stage` は `prepare|precheck|backup|change|rollback|commit|all`。`all` は閲覧用で、一括貼り付け不可のコメントと段階見出しを付けます。拒否は共通 validator の理由コードを stderr に出し終了コード 2。`--json` は `backupSet` の結果そのものです。未対応の述語や値表現は既存の変換にフォールバックしません。
 
-`node tests/run-tests.mjs` は文字列・契約検査。`npm run test:pg` は `SQLMEGANE_PG` 接続文字列がなければ skip、あれば PostgreSQL 18 に接続して生成 SQL を実行します。公開前に実行結果を `business/qa/` に保存し、対話クライアント・切断時の運用・ブラインドテストを確認してください。実 DB 試験未実行の状態では planned の表示を維持します。
+`node tests/run-tests.mjs` は文字列・契約検査。`npm run test:pg` は `SQLMEGANE_PG` 接続文字列がなければ skip、あれば PostgreSQL 18 に接続して生成 SQL を実行します。2026-09-20 に PostgreSQL 18.3 で 13 項目に合格しています（試験の内訳は tests/pg-smoke.mjs）。psql の ON_ERROR_ROLLBACK、NOWAIT 失敗後の手順、切断・COMMIT 応答不明時の運用は自動化できないため、上の運用注記に従ってください。
 
 ## 型紙
 
