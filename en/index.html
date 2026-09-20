@@ -4,7 +4,7 @@
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
 <title>SQLMegane — Review SQL before you run it</title>
-<meta name="description" content="A private, browser-only SQL review tool. Paste an UPDATE, DELETE, or TRUNCATE and read it back as one plain-English sentence before you run it. Flags missing WHERE clauses, full-table changes, and risky JOINs. Nothing leaves your browser.">
+<meta name="description" content="A private, browser-only SQL review tool. Paste an UPDATE, DELETE, or TRUNCATE and read it back as one plain-English sentence before you run it. Flags missing WHERE clauses, full-table changes, and risky JOINs using SQL parsing and rules, without an LLM. Nothing leaves your browser.">
 <link rel="canonical" href="https://selene-nyx-ai.github.io/sqlmegane/en/">
 <meta name="google-site-verification" content="t-PSVDqlgIvjoYaXX6ktKXU04HLy1_j46COY3Kxfrk4">
 <meta property="og:type" content="website">
@@ -35,7 +35,7 @@
 
   <section class="privacy-banner" aria-label="Privacy" data-i18n-aria="ui.privacyAria">
     <span class="privacy-icon" aria-hidden="true">🔒</span>
-    <p data-i18n="ui.privacy">Your SQL is processed only in this browser and is never sent anywhere. No server or installation is required.</p>
+    <p data-i18n="ui.privacy">Your SQL is processed only in your browser and is never sent to external services, including AI services. Checks use SQL parsing and rules, without an LLM. No server or installation is required.</p>
   </section>
 
   <section class="panel input-panel">

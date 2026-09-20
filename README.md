@@ -10,6 +10,9 @@
 
 競合の Bytebase のような組織導入型ツール（サーバー構築・アカウント管理が必要）とは異なり、
 **インストール不要・組織導入不要・SQLはブラウザから一切外部に送信されない** ことを狙いにしています。
+SQLMegane から入力 SQL が AI サービスを含む外部サービスへ渡り、そこで保存されたり AI の学習に使われたりすることはありません。
+判定には LLM を使わず、構文解析と規則を用います。同じバージョン・同じ方言設定では、同じ SQL に同じ解析結果を返します
+（MySQL / PostgreSQL / SQL Server は AST、Oracle / 汎用は正規表現によるヒューリスティック）。解析や規則の制約により、結果が誤ったり不完全になったりする場合があります。
 
 v2 から、MySQL / PostgreSQL / SQL Server については本物のSQLパーサ
 （[node-sql-parser](https://github.com/taozhi8833998/node-sql-parser) / Apache-2.0 / 同梱）で

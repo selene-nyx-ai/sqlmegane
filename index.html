@@ -4,7 +4,7 @@
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
 <title>SQLMegane（SQLめがね） - 本番SQLの実行前チェック。WHERE忘れ・全件更新/削除に、日本語で読み返して気づく</title>
-<meta name="description" content="本番SQLを手作業で実行する前のチェックツール。UPDATE/DELETEのWHERE忘れ・全件更新・TRUNCATE・JOINの罠を、SQLを貼るだけで日本語の一文に要約して読み返せます。検算SELECTも自動生成。インストール不要・SQLは外部送信されません。MySQL・PostgreSQL・SQL Server・Oracle PL/SQL対応（自動判定）。">
+<meta name="description" content="本番SQLを実行前にブラウザ内で日本語に読み返して確認するツール。SQLは外部送信せず、LLMも使わず、構文解析と規則でUPDATE/DELETEのWHERE忘れ・全件更新・TRUNCATE・JOINの罠を検出。検算SELECTも生成。インストール不要。MySQL・PostgreSQL・SQL Server・Oracle PL/SQL対応（自動判定）。">
 <link rel="canonical" href="https://selene-nyx-ai.github.io/sqlmegane/">
 <meta name="google-site-verification" content="t-PSVDqlgIvjoYaXX6ktKXU04HLy1_j46COY3Kxfrk4">
 <meta property="og:type" content="website">
@@ -35,7 +35,7 @@
 
   <section class="privacy-banner" aria-label="プライバシーについて" data-i18n-aria="ui.privacyAria">
     <span class="privacy-icon" aria-hidden="true">🔒</span>
-    <p data-i18n="ui.privacy">入力されたSQLは<strong>ブラウザ内でのみ処理</strong>され、外部へ一切送信されません。サーバーもインストールも不要です。</p>
+    <p data-i18n="ui.privacy">入力されたSQLは<strong>ブラウザ内だけで処理</strong>し、AIサービスを含む外部へ送信しません。チェックにはLLM（生成AI）を使わず、SQLの<strong>構文解析と規則</strong>で判定します。サーバーもインストールも不要です。</p>
   </section>
 
   <section class="panel input-panel">
