@@ -779,8 +779,48 @@ function appendByKeyChooser(card, sql, dialect, inspection) {
   if (byKeyState.converted && radios.some((x) => x.checked)) button.click();
 }
 
+// 生成した DELETE / UPDATE を本体の実行前チェックにかけ、問題があるときだけ最上部に「何が問題か・どう直せば通るか」を出す。
+// danger（全行対象など）はコピーを止め、利用者が確認したときだけ有効にする（しぐれさん指摘 2026-09-20: 「危険と言われても直せなければ意味がない」）。
 function appendConvertedStages(card, converted, dialect) {
-  const proven = converted.equivalence === 'proven';
+  const checked = analyzeSQL([converted.delete, converted.update].join(String.fromCharCode(10)), dialect, { oracleVersion: els.oracleVersion.value });
+  const seen = new Set();
+  const issues = checked.statements.flatMap((s) => s.findings || [])
+    .filter((f) => ['danger', 'warning'].includes(f.severity) && !seen.has(f.code) && seen.add(f.code));
+  const dangers = issues.filter((f) => f.severity === 'danger');
+  let acknowledged = false;
+  const body = el('div');
+  if (issues.length) {
+    const box = el('div', { className: `conversion-issues ${dangers.length ? 'conversion-issues-danger' : 'conversion-issues-warning'}` });
+    box.appendChild(el('p', { className: 'conversion-issues-head', text: t(dangers.length ? 'ui.dmlIssuesDanger' : 'ui.dmlIssuesWarning') }));
+    for (const f of issues) {
+      const item = el('p', { className: 'conversion-issue' });
+      item.appendChild(el('strong', { text: f.title }));
+      item.appendChild(document.createTextNode(' ' + fixAdvice(f)));
+      box.appendChild(item);
+    }
+    if (dangers.length) {
+      const ack = el('label', { className: 'conversion-ack' });
+      const input = el('input', { attrs: { type: 'checkbox' } });
+      input.addEventListener('change', () => { acknowledged = input.checked; render(); });
+      ack.append(input, document.createTextNode(t('ui.dmlAck')));
+      box.appendChild(ack);
+    }
+    card.appendChild(box);
+  }
+  card.appendChild(body);
+  function render() { body.replaceChildren(); renderConvertedBody(body, converted, dialect, !dangers.length || acknowledged); }
+  render();
+  return card;
+}
+
+// 指摘コードごとの「こちらで直せないので、元の SELECT をこう直してほしい」の文。無ければ指摘文そのもの。
+function fixAdvice(finding) {
+  const messages = I18n.messages[I18n.getLocale() === 'en' ? 'en' : 'ja'];
+  return messages[`dml.fix.${finding.code}`] || finding.message || messages['dml.fix.default'];
+}
+
+function renderConvertedBody(card, converted, dialect, allowed) {
+  const proven = converted.equivalence === 'proven' && allowed;
   for (const code of converted.warnings || []) card.appendChild(el('p', { className: 'conversion-warning', text: t(`dml.warning.${code}`) }));
   card.appendChild(sqlCopyBlock(t('ui.stepOriginal'), converted.original, true));
   card.appendChild(sqlCopyBlock(t('ui.stepCount'), converted.countSelect, true));
@@ -807,15 +847,8 @@ function appendConvertedStages(card, converted, dialect) {
   card.appendChild(folded.wrap);
 
   const syntaxOk = Object.values(converted.syntaxCheck || {}).every((x) => x && x.ok);
-  const syntaxMessage = syntaxOk ? t('ui.syntaxCheckOk')
-    : t(converted.mode === 'by-key' ? 'ui.syntaxCheckWithFailed' : 'ui.syntaxCheckFailed');
-  card.appendChild(el('p', { className: 'conversion-step', text: syntaxMessage }));
-
-  const verification = el('details', { className: 'conversion-step' });
-  verification.appendChild(el('summary', { text: t('ui.selfCheck') }));
-  const checked = analyzeSQL(`${converted.delete}\n${updatePre.textContent}`, dialect, { oracleVersion: els.oracleVersion.value });
-  for (const statement of checked.statements) verification.appendChild(renderStatementCard(statement, dialect));
-  card.appendChild(verification);
+  // Only problems are shown: a passing syntax check is not the user's concern.
+  if (!syntaxOk) card.appendChild(el('p', { className: 'conversion-warning', text: t(converted.mode === 'by-key' ? 'ui.syntaxCheckWithFailed' : 'ui.syntaxCheckFailed') }));
 
   const safe = el('div', { className: 'conversion-step safe-actions' });
   // 何をコピーするのかを先に 1 行で（「安全実行の枠付き」では意味が伝わらない、というしぐれさん指摘 2026-09-17）

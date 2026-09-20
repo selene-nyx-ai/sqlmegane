@@ -79,6 +79,8 @@ For MySQL, PostgreSQL, and SQL Server, the bundled parser re-parses the generate
 
 Always read the generated SQL before using it. The candidate count SELECT is an estimate of matching rows, not the affected-row count. A DELETE built from an aliased SELECT uses MySQL 8.0.16+ syntax (`DELETE FROM t AS a`); drop the alias on older MySQL. The CLI `convert` command prints danger and warning findings from the self-check to stderr (for example, DML built from a SELECT without WHERE).
 
+The generated DELETE / UPDATE is run through the pre-execution checker. Nothing is shown when it is clean. If it is dangerous (no WHERE, an always-true WHERE, and so on), the top of the result shows what is wrong and how to change the original SELECT so it passes, and copying the DELETE / UPDATE and the safe block stays disabled until you tick "This is intended". Warnings (such as a leading % in LIKE) are shown in yellow and do not block copying.
+
 ## Back up before changing (backup → change → compensation)
 
 Open the collapsed **Back up before changing** section below the SELECT converter. Specify a new backup table, explicitly select backup and key columns, and enter literal assignments for UPDATE. Candidates come from direct SELECT output columns; replace `SELECT *` with explicit columns first. Missing or unsupported input disables copying. This tool prepares SQL without connecting to a database.
