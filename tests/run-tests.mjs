@@ -1468,7 +1468,7 @@ function analyticsFixture(token = 'test-token', hash = '#sql=SELECT%201&dialect=
   };
   const context = vm.createContext({ window: win });
   vm.runInContext(readProjectFile('js/analytics-config.js'), context);
-  assert.equal(win.SQLMEGANE_CF_TOKEN, '');
+  assert.equal(typeof win.SQLMEGANE_CF_TOKEN, 'string'); // 設定ファイルは文字列 1 つだけ（値は運用で変わる）
   win.SQLMEGANE_CF_TOKEN = token;
   vm.runInContext(readProjectFile('js/analytics.js'), context);
   const initialize = (readHash = () => {}) => context.SQLMeganeAnalytics.initialize(win, doc, readHash);

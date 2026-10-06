@@ -30,6 +30,7 @@
 
     const script = doc.createElement('script');
     script.src = 'https://static.cloudflareinsights.com/beacon.min.js';
+    script.type = 'module'; // Cloudflare の公式スニペットと同じ形
     script.async = true;
     script.setAttribute('data-cf-beacon', JSON.stringify({ token: win.SQLMEGANE_CF_TOKEN, spa: false }));
     doc.head.appendChild(script);
