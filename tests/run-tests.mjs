@@ -316,6 +316,144 @@ test('SELECT文には検算SELECTを生成しない', () => {
   assert.equal(s.verifySelect, null);
 });
 
+// D7: MySQL DML LIMIT must be visible in both summaries and verification queries.
+for (const locale of ['ja', 'en']) {
+  for (const dml of ['UPDATE orders o SET status = 1', 'DELETE FROM orders o']) {
+    for (const ordered of [false, true]) {
+      test(`D7: ${locale} ${dml.split(' ')[0]} LIMIT ${ordered ? 'with' : 'without'} ORDER BY`, () => {
+        const i18n = globalThis.SQLMeganeI18n;
+        i18n.setLocale(locale);
+        try {
+          const order = ordered ? ' ORDER BY o.id DESC, o.customer_id ASC' : '';
+          const s = firstStatement(`${dml} WHERE o.customer_id = 7${order} LIMIT 10;`, 'mysql');
+          assert.equal(s.parse.mode, 'ast');
+          assert.ok(!hasCode(s.findings, 'mysql-no-limit'));
+          assert.ok(summaryText(s).includes(i18n.t('summary.dmlLimit', { value: '10' })));
+          assert.equal(summaryText(s).includes(i18n.t('summary.dmlLimitUnordered')), !ordered);
+          if (ordered) {
+            assert.equal(s.verifySelect, `-- ${i18n.t('ui.verifyLimitOrderedNote')}\nSELECT * FROM orders o WHERE o.customer_id = 7${order} LIMIT 10;`);
+            assert.ok(summaryText(s).includes(i18n.t('summary.dmlLimitOrdered')));
+            assert.ok(globalThis.SQLMeganeSqlAst.parseStatement(s.verifySelect, 'mysql').ok);
+          } else {
+            assert.equal(s.verifySelect, `-- ${i18n.t('ui.verifyLimitNote', { value: '10' })}\nSELECT COUNT(*) FROM orders o WHERE o.customer_id = 7;`);
+            assert.match(s.verifySelect, locale === 'ja' ? /候補行数.*実際に変更される行数ではありません/ : /candidate rows, not rows actually changed/);
+          }
+        } finally {
+          i18n.setLocale('ja');
+        }
+      });
+    }
+  }
+}
+
+for (const dialect of ['postgres', 'mssql']) {
+  for (const dml of ['UPDATE orders SET status = 1', 'DELETE FROM orders']) {
+    test(`D7: ${dialect} ${dml.split(' ')[0]} verification is unchanged`, () => {
+      const s = firstStatement(`${dml} WHERE customer_id = 7;`, dialect);
+      assert.equal(s.parse.mode, 'ast');
+      assert.equal(s.verifySelect, 'SELECT COUNT(*) FROM orders WHERE customer_id = 7;');
+      assert.doesNotMatch(summaryText(s), /LIMIT|最大|deterministic/);
+    });
+  }
+}
+
+test('D7: LIMIT 0 is retained and a nested ORDER BY does not order the DML', () => {
+  const s = firstStatement('DELETE FROM orders WHERE id IN (SELECT id FROM old_orders ORDER BY id LIMIT 2) LIMIT 0;', 'mysql');
+  assert.match(summaryText(s), /最大 0 行/);
+  assert.match(summaryText(s), /選ばれる行は確定しません/);
+  assert.match(s.verifySelect, /実際の対象は最大 0 行/);
+  assert.match(s.verifySelect, /SELECT COUNT\(\*\).*ORDER BY id LIMIT 2\);$/);
+});
+
+test('D7: ordered DELETE without WHERE preserves its limit', () => {
+  const s = firstStatement('DELETE FROM orders ORDER BY id LIMIT 3;', 'mysql');
+  assert.match(summaryText(s), /最大 3 行/);
+  assert.equal(s.verifySelect, `-- ${globalThis.SQLMeganeI18n.t('ui.verifyLimitOrderedNote')}\nSELECT * FROM orders ORDER BY id LIMIT 3;`);
+});
+
+for (const locale of ['ja', 'en']) {
+  test(`D7: ${locale} non-MySQL fallback LIMIT has no DML LIMIT summary`, () => {
+    const i18n = globalThis.SQLMeganeI18n;
+    i18n.setLocale(locale);
+    try {
+      for (const dialect of ['postgres', 'mssql']) {
+        const s = firstStatement('DELETE FROM orders WHERE id>0 LIMIT 10;', dialect);
+        assert.equal(s.parse.usedFallbackDialect, 'mysql');
+        for (const key of ['summary.dmlLimit', 'summary.dmlLimitUnordered', 'summary.dmlLimitOrdered', 'summary.dmlLimitUnsupported']) {
+          assert.ok(!summaryText(s).includes(i18n.t(key, { value: '10' })));
+        }
+      }
+    } finally { i18n.setLocale('ja'); }
+  });
+
+  const unsupported = [
+    ['UPDATE orders o JOIN customers c ON o.customer_id=c.id SET o.status=1 WHERE o.id>0 ORDER BY o.id LIMIT 10;', '10'],
+    ['DELETE o FROM orders o JOIN customers c ON o.customer_id=c.id WHERE o.id>0 ORDER BY o.id LIMIT 10;', '10'],
+    ['DELETE FROM orders WHERE id>0 LIMIT 10 OFFSET 5;', '10 OFFSET 5'],
+    ['DELETE FROM orders WHERE id>0 LIMIT 5, 10;', '5, 10'],
+    ['WITH x AS (SELECT id FROM orders) DELETE FROM orders WHERE id>0 LIMIT 10;', '10'],
+    ['DELETE FROM orders WHERE id>0 LIMIT ?;', '?'],
+    ['DELETE FROM orders WHERE id>0 LIMIT :n;', ':n'],
+  ];
+  for (const [sql, value] of unsupported) {
+    test(`D7: ${locale} neutral unsupported LIMIT: ${sql}`, () => {
+      const i18n = globalThis.SQLMeganeI18n;
+      i18n.setLocale(locale);
+      try {
+        const s = firstStatement(sql, 'mysql');
+        assert.equal(s.parse.mode, 'ast');
+        assert.ok(summaryText(s).includes(i18n.t('summary.dmlLimitUnsupported', { value })));
+        assert.doesNotMatch(summaryText(s), /最大|caps the rows/);
+        assert.ok(s.verifySelect.includes(i18n.t('summary.dmlLimitUnsupported', { value })));
+        assert.doesNotMatch(s.verifySelect, /SELECT \*/);
+        assert.doesNotMatch(s.verifySelect.split('\n').filter((line) => !line.startsWith('--')).join('\n'), /\bLIMIT\b/i);
+        if (value === '?' || value === ':n') assert.ok(s.verifySelect.endsWith('WHERE id>0;'));
+      } finally { i18n.setLocale('ja'); }
+    });
+  }
+
+  for (const fn of ['RAND', 'RANDOM']) {
+    test(`D7: ${locale} ${fn} order uses candidate count`, () => {
+      const i18n = globalThis.SQLMeganeI18n;
+      i18n.setLocale(locale);
+      try {
+        const s = firstStatement(`DELETE FROM orders WHERE id>0 ORDER BY ${fn}() LIMIT 10;`, 'mysql');
+        assert.ok(summaryText(s).includes(i18n.t('summary.dmlLimitOrdered')));
+        assert.equal(s.verifySelect, `-- ${i18n.t('ui.verifyLimitNote', { value: '10' })}\nSELECT COUNT(*) FROM orders WHERE id>0;`);
+      } finally { i18n.setLocale('ja'); }
+    });
+  }
+
+  test(`D7: ${locale} large LIMIT retains source digits`, () => {
+    const i18n = globalThis.SQLMeganeI18n;
+    i18n.setLocale(locale);
+    try {
+      const value = '9007199254740993';
+      const s = firstStatement(`DELETE FROM orders WHERE id>0 LIMIT ${value};`, 'mysql');
+      assert.ok(summaryText(s).includes(i18n.t('summary.dmlLimit', { value })));
+      assert.equal(s.verifySelect, `-- ${i18n.t('ui.verifyLimitNote', { value })}\nSELECT COUNT(*) FROM orders WHERE id>0;`);
+    } finally { i18n.setLocale('ja'); }
+  });
+
+  test(`D7: ${locale} nested LIMIT remains in the candidate count`, () => {
+    const i18n = globalThis.SQLMeganeI18n;
+    i18n.setLocale(locale);
+    try {
+      const s = firstStatement('DELETE FROM orders WHERE id IN (SELECT id FROM old_orders ORDER BY id LIMIT 2) LIMIT 0;', 'mysql');
+      assert.ok(summaryText(s).includes(i18n.t('summary.dmlLimit', { value: '0' })));
+      assert.ok(summaryText(s).includes(i18n.t('summary.dmlLimitUnordered')));
+      assert.equal(s.verifySelect, `-- ${i18n.t('ui.verifyLimitNote', { value: '0' })}\nSELECT COUNT(*) FROM orders WHERE id IN (SELECT id FROM old_orders ORDER BY id LIMIT 2);`);
+    } finally { i18n.setLocale('ja'); }
+  });
+}
+
+test('D7: rejected @x LIMIT is stripped on the regex note path', () => {
+  const s = firstStatement('DELETE FROM orders WHERE id>0 LIMIT @x;', 'mysql');
+  assert.equal(s.parse.mode, 'fallback');
+  assert.ok(s.verifySelect.includes(globalThis.SQLMeganeI18n.t('summary.dmlLimitUnsupported', { value: '@x' })));
+  assert.ok(s.verifySelect.endsWith('WHERE id>0;'));
+});
+
 // ---------------------------------------------------------------------------
 // トランザクション文脈 / 複数破壊的文
 // ---------------------------------------------------------------------------

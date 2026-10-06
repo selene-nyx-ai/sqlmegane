@@ -662,7 +662,21 @@ function setPhrase(ast) {
   return `${columnLabel(cols[0])} など${sets.length}列を更新します`;
 }
 
-function summarizeUpdate(ast) {
+// UPDATE/DELETE limits do not pass through the SELECT summary branch.
+function dmlLimitBlocks(ast, info) {
+  if (!info) return [];
+  const { value, supported } = info;
+  if (!supported) return [{ type: 'text', text: t('summary.dmlLimitUnsupported', { value }) }];
+  const blocks = [{ type: 'text', text: t('summary.dmlLimit', { value }) }];
+  if (!ast.orderby || ast.orderby.length === 0) {
+    blocks.push({ type: 'text', text: t('summary.dmlLimitUnordered') });
+  } else {
+    blocks.push({ type: 'text', text: t('summary.dmlLimitOrdered') });
+  }
+  return blocks;
+}
+
+function summarizeUpdate(ast, opts) {
   const rowSource = A.rowSourceTables(ast);
   const targets = A.writeTargets(ast);
 
@@ -677,6 +691,7 @@ function summarizeUpdate(ast) {
   if (setBlock) blocks.push(setBlock);
   blocks.push(...joinBlocks(rowSource));
   blocks.push(...whereBlocks(ast, 'UPDATE'));
+  blocks.push(...dmlLimitBlocks(ast, opts.dmlLimit));
 
   const gist = joinGist(ast, rowSource, targets[0] && targets[0].table);
   const where = whereGist(ast, gist.consumed);
@@ -687,7 +702,7 @@ function summarizeUpdate(ast) {
   return Object.assign({ op: 'UPDATE', blocks }, finishHeadline(subj.parts, subj.note));
 }
 
-function summarizeDelete(ast) {
+function summarizeDelete(ast, opts) {
   const rowSource = A.rowSourceTables(ast);
   const targets = A.writeTargets(ast);
 
@@ -700,6 +715,7 @@ function summarizeDelete(ast) {
   }
   blocks.push(...joinBlocks(rowSource));
   blocks.push(...whereBlocks(ast, 'DELETE'));
+  blocks.push(...dmlLimitBlocks(ast, opts.dmlLimit));
 
   const gist = joinGist(ast, rowSource, targets[0] && targets[0].table);
   const where = whereGist(ast, gist.consumed);
@@ -864,7 +880,7 @@ function enAssignments(ast) {
   return sets.map((s) => `${enValue(s.column)} = ${enValue(s.value)}`).join(', ');
 }
 
-function summarizeEnglish(ast) {
+function summarizeEnglish(ast, opts) {
   const type = String(ast.type || '').toLowerCase();
   const targets = A.writeTargets(ast);
   const rows = A.rowSourceTables(ast);
@@ -911,7 +927,8 @@ function summarizeEnglish(ast) {
     blocks.push({ type: 'join', text: t(key, { table: enTable(rows[i]), kind }) });
   }
   if (ast.groupby) blocks.push({ type: 'text', text: t('summary.groupby') });
-  if (ast.limit && ast.limit.value) blocks.push({ type: 'text', text: t('summary.limit', { value: ast.limit.value.map(enValue).join(', ') }) });
+  if (type === 'update' || type === 'delete') blocks.push(...dmlLimitBlocks(ast, opts.dmlLimit));
+  else if (ast.limit && ast.limit.value) blocks.push({ type: 'text', text: t('summary.limit', { value: ast.limit.value.map(enValue).join(', ') }) });
   if (ast.with && ast.with.length) blocks.unshift({ type: 'text', text: t('summary.cte', { names: ast.with.map((w) => (w.name && (w.name.value || w.name)) || '?').join(', ') }) });
   return { op, headline, headlineParts: [{ text: headline, strong: false }], blocks };
 }
@@ -941,14 +958,14 @@ function localizeJapaneseSummary(summary) {
  * AST から日本語要約を作る。要約できない文種別では null を返す
  * （＝要約カードを出さない。無理に何か書くより黙るほうが誠実）。
  */
-function summarize(ast) {
+function summarize(ast, opts = {}) {
   if (!ast || typeof ast !== 'object') return null;
-  if (I18n && I18n.getLocale() === 'en') return summarizeEnglish(ast);
+  if (I18n && I18n.getLocale() === 'en') return summarizeEnglish(ast, opts);
   let summary = null;
 
   switch (ast.type) {
-    case 'update': summary = summarizeUpdate(ast); break;
-    case 'delete': summary = summarizeDelete(ast); break;
+    case 'update': summary = summarizeUpdate(ast, opts); break;
+    case 'delete': summary = summarizeDelete(ast, opts); break;
     case 'insert':
     case 'replace': summary = summarizeInsert(ast); break;
     case 'select': summary = summarizeSelect(ast); break;

@@ -1066,6 +1066,40 @@ function finalizeVerifySelect(sql) {
   return { sql: `-- ${note}\n${sql}`, hasJoin: true };
 }
 
+// Read the source text so large integer limits keep their exact digits.
+function mysqlDmlLimitInfo(ast, masked, plain, kind) {
+  if (!['UPDATE', 'DELETE'].includes(kind)) return null;
+  const limit = topLevelSearchValidated(masked, ['LIMIT'], findCteBodyStart(masked),
+    (_, str, end) => /^\s+(?:\d|\?|:[A-Za-z_]\w*|@[A-Za-z_]\w*)/.test(str.slice(end)));
+  if (!limit) return null;
+  const value = plain.slice(limit.index + limit.length).trim().replace(/;\s*$/, '').trim();
+  const values = ast && ast.limit && ast.limit.value;
+  const supported = !!ast && globalThis.SQLMeganeSqlAst.rowSourceTables(ast).length === 1
+    && !(ast.with && ast.with.length) && Array.isArray(values) && values.length === 1
+    && ['number', 'bigint'].includes(values[0].type) && /^\d+$/.test(value);
+  return { value, supported };
+}
+
+// LIMIT on an aggregate does not cap the counted rows; show ordered rows instead.
+function applyMysqlDmlLimit(sql, ast, masked, plain, info) {
+  if (!sql || !info) return sql;
+  const { value, supported } = info;
+  const order = topLevelSearchValidated(masked, ['ORDER'], findCteBodyStart(masked), isValidWhereEndMatch);
+  const limit = topLevelSearchValidated(masked, ['LIMIT'], findCteBodyStart(masked), isValidWhereEndMatch);
+  // Preserve the original order expressions; unsupported shapes retain a candidate count.
+  if (supported && ast.orderby && ast.orderby.length && order && limit
+      && order.index < limit.index && !/\b(?:RAND|RANDOM)\s*\(/i.test(masked.slice(order.index, limit.index))) {
+    const tail = plain.slice(order.index).trim().replace(/;\s*$/, '');
+    return '-- ' + I18n.t('ui.verifyLimitOrderedNote') + '\n'
+      + sql.replace(/^SELECT COUNT\(\*\)/, 'SELECT *').replace(/;$/, ' ' + tail + ';');
+  }
+  const countMasked = scan(sql, 'mysql').masked;
+  const trailingLimit = topLevelSearchValidated(countMasked, ['LIMIT'], findCteBodyStart(countMasked),
+    (_, str, end) => /^\s+(?:\d+|\?|:[A-Za-z_]\w*|@[A-Za-z_]\w*)(?:\s*(?:,|OFFSET)\s*(?:\d+|\?|:[A-Za-z_]\w*|@[A-Za-z_]\w*))?\s*;?\s*$/i.test(str.slice(end)));
+  if (trailingLimit) sql = sql.slice(0, trailingLimit.index).trimEnd() + ';';
+  return '-- ' + I18n.t(supported ? 'ui.verifyLimitNote' : 'summary.dmlLimitUnsupported', { value }) + '\n' + sql;
+}
+
 function buildVerifySelectFromAst(kind, ast, masked, plain, whereInfo) {
   const A = globalThis.SQLMeganeSqlAst;
   if (!A || !ast) return null;
@@ -1401,7 +1435,8 @@ function analyzeStatement(rawStmt, dialect, opts) {
     }
   }
 
-  const summary = (ast && Summarizer) ? Summarizer.summarize(ast) : null;
+  const dmlLimit = dialect === 'mysql' && !parse.usedFallbackDialect ? mysqlDmlLimitInfo(ast, masked, plain, kind) : null;
+  const summary = (ast && Summarizer) ? Summarizer.summarize(ast, { dmlLimit }) : null;
 
   // AST基盤ルールを使うのは UPDATE / DELETE / SELECT のうち、ASTの文種別が正規表現側の
   // 判定と一致するものだけ。食い違うときは安全側（従来ロジック）に倒す。
@@ -1416,6 +1451,7 @@ function analyzeStatement(rawStmt, dialect, opts) {
     if (kind === 'UPDATE' || kind === 'DELETE') {
       verifySelectRaw = buildVerifySelectFromAst(kind, ast, masked, plain, whereInfo)
         || buildVerifySelect(kind, masked, whereInfo, plain);
+      verifySelectRaw = applyMysqlDmlLimit(verifySelectRaw, ast, masked, plain, dmlLimit);
     }
     const finalizedVerify = finalizeVerifySelect(verifySelectRaw);
     findings.sort((a, b) => SEVERITY_ORDER[a.severity] - SEVERITY_ORDER[b.severity]);
@@ -1432,7 +1468,7 @@ function analyzeStatement(rawStmt, dialect, opts) {
     };
   }
 
-  return analyzeStatementByRegex(rawStmt, dialect, { plain, masked, kind, whereInfo, summary, parse, ast, cursorContext });
+  return analyzeStatementByRegex(rawStmt, dialect, { plain, masked, kind, whereInfo, summary, parse, ast, cursorContext, dmlLimit });
 }
 
 /** 従来の正規表現ヒューリスティックによる解析（フォールバック経路） */
@@ -1639,6 +1675,7 @@ function analyzeStatementByRegex(rawStmt, dialect, ctx) {
   let verifySelectRaw = null;
   if (kind === 'UPDATE' || kind === 'DELETE') {
     verifySelectRaw = buildVerifySelect(kind, masked, whereInfo, plain);
+    verifySelectRaw = applyMysqlDmlLimit(verifySelectRaw, ctx.ast, masked, plain, ctx.dmlLimit);
   }
   const finalizedVerify = finalizeVerifySelect(verifySelectRaw);
 
