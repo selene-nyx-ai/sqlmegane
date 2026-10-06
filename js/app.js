@@ -1115,10 +1115,9 @@ function applyHashSql() {
   els.dialect.value = dialect && [...els.dialect.options].some((o) => o.value === dialect) ? dialect : 'auto';
   els.input.value = sql;
   showDmlBuilder = false;
-  refreshControls();
   return true;
 }
+SQLMeganeAnalytics.initialize(window, document, applyHashSql);
 refreshControls();
-applyHashSql();
 // 初期表示
 render();

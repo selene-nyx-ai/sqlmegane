@@ -14,7 +14,7 @@
 <meta property="og:description" content="Read your SQL back as one plain-English sentence and catch missing WHERE clauses, full-table changes, TRUNCATE, and risky JOINs before execution. Everything stays in your browser.">
 <meta property="og:locale" content="en_US">
 <meta name="twitter:card" content="summary">
-<meta http-equiv="Content-Security-Policy" content="default-src 'self'; script-src 'self'; style-src 'self'; connect-src 'none'; form-action 'none'">
+<meta http-equiv="Content-Security-Policy" content="default-src 'self'; script-src 'self' https://static.cloudflareinsights.com/beacon.min.js; style-src 'self'; connect-src https://cloudflareinsights.com/cdn-cgi/rum; form-action 'none'">
 <link rel="stylesheet" href="../css/style.css?v=20260920-why">
 </head>
 <body>
@@ -35,7 +35,7 @@
 
   <section class="privacy-banner" aria-label="Privacy" data-i18n-aria="ui.privacyAria">
     <span class="privacy-icon" aria-hidden="true">🔒</span>
-    <p data-i18n="ui.privacy">Your SQL is processed only in your browser and is never sent to external services, including AI services. Checks use SQL parsing and rules, without an LLM. No server or installation is required.</p>
+    <p data-i18n="ui.privacy">Your SQL is processed only in your browser and is never sent to external services, including AI services. Checks use SQL parsing and rules, without an LLM. No server or installation is required. Cloudflare Web Analytics is loaded and sends only page views and page-performance metrics (no cookies; your SQL and the `#sql=` part of the URL are never sent).</p>
   </section>
 
   <section class="panel input-panel">
@@ -136,6 +136,8 @@
 <script src="../js/dialect-detect.js"></script>
 <script src="../js/dml-builder.js"></script>
 <script src="../js/templates.js"></script>
+<script src="../js/analytics-config.js"></script>
+<script src="../js/analytics.js"></script>
 <script src="../js/app.js"></script>
 </body>
 </html>

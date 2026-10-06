@@ -5,6 +5,7 @@
 import assert from 'node:assert/strict';
 import fs from 'node:fs';
 import path from 'node:path';
+import vm from 'node:vm';
 import { fileURLToPath } from 'node:url';
 
 // js/analyzer.js はfile://直開き対応のためESMのexportを使わず、globalThisに
@@ -742,7 +743,8 @@ test('index.htmlはCSP metaタグを持ち、想定のディレクティブを�
   assert.match(csp, /default-src 'self'/);
   assert.match(csp, /script-src 'self'/);
   assert.match(csp, /style-src 'self'/);
-  assert.match(csp, /connect-src 'none'/);
+  assert.match(csp, /script-src 'self' https:\/\/static\.cloudflareinsights\.com\/beacon\.min\.js;/);
+  assert.match(csp, /connect-src https:\/\/cloudflareinsights\.com\/cdn-cgi\/rum;/);
   assert.match(csp, /form-action 'none'/);
 });
 
@@ -1424,10 +1426,103 @@ test('index.htmlは同梱パーサとAST関連スクリプトをこの順で読�
   }
 });
 
-test('index.htmlはCDNなど外部ホストのスクリプトを読み込まない', () => {
-  const html = readProjectFile('index.html');
-  assert.ok(!/<script[^>]+src="https?:/i.test(html));
-  assert.ok(!/<script[^>]+src="\/\//i.test(html));
+test('両ページに静的な外部スクリプト（Cloudflare beacon を含む）はない', () => {
+  for (const page of ['index.html', 'en/index.html']) {
+    const html = readProjectFile(page);
+    assert.ok(!/<script\b[^>]*\bsrc\s*=\s*['"](?:https?:|\/\/)/i.test(html), page);
+    assert.ok(!/<script\b[^>]*cloudflareinsights/i.test(html), page);
+    const prefix = page.startsWith('en/') ? '../' : '';
+    assert.ok(html.indexOf(`<script src="${prefix}js/analytics-config.js"></script>`) > 0);
+    assert.ok(html.indexOf(`<script src="${prefix}js/analytics.js"></script>`) < html.indexOf(`<script src="${prefix}js/app.js"></script>`));
+  }
+});
+
+function analyticsFixture(token = 'test-token', hash = '#sql=SELECT%201&dialect=mysql') {
+  const events = [];
+  const scripts = [];
+  const listeners = {};
+  const win = {
+    location: { hash, pathname: '/sqlmegane/en/', search: '?lang=en' },
+    history: {
+      state: { existing: true },
+      replaceState(state, title, url) {
+        assert.equal(state, this.state);
+        assert.equal(url, '/sqlmegane/en/?lang=en');
+        events.push('strip');
+        win.location.hash = '';
+      },
+    },
+    addEventListener(name, fn) { listeners[name] = fn; },
+  };
+  const doc = {
+    createElement(tag) {
+      assert.equal(tag, 'script');
+      assert.equal(win.location.hash, '');
+      return { setAttribute(name, value) { this[name] = value; } };
+    },
+    head: { appendChild(script) {
+      assert.equal(win.location.hash, '');
+      events.push('inject');
+      scripts.push(script);
+    } },
+  };
+  const context = vm.createContext({ window: win });
+  vm.runInContext(readProjectFile('js/analytics-config.js'), context);
+  assert.equal(win.SQLMEGANE_CF_TOKEN, '');
+  win.SQLMEGANE_CF_TOKEN = token;
+  vm.runInContext(readProjectFile('js/analytics.js'), context);
+  const initialize = (readHash = () => {}) => context.SQLMeganeAnalytics.initialize(win, doc, readHash);
+  return { win, events, scripts, listeners, initialize };
+}
+
+test('analytics: SQL の読込 → ハッシュ除去 → beacon 挿入の順序を守る', () => {
+  const f = analyticsFixture();
+  assert.equal(f.initialize(() => {
+    assert.equal(new URLSearchParams(f.win.location.hash.slice(1)).get('sql'), 'SELECT 1');
+    f.events.push('read');
+  }), true);
+  assert.deepEqual(f.events, ['read', 'strip', 'inject']);
+  assert.equal(f.scripts[0].src, 'https://static.cloudflareinsights.com/beacon.min.js');
+  assert.equal(f.scripts[0].async, true);
+  assert.deepEqual(JSON.parse(f.scripts[0]['data-cf-beacon']), { token: 'test-token', spa: false });
+});
+
+test('analytics: 空トークンでは挿入しないが、ハッシュは除去する', () => {
+  const f = analyticsFixture('');
+  assert.equal(f.initialize(), false);
+  assert.equal(f.win.location.hash, '');
+  assert.equal(f.scripts.length, 0);
+});
+
+test('analytics: 後続のハッシュは除去し、SQL 再適用や beacon 再挿入はしない', () => {
+  const f = analyticsFixture();
+  f.initialize();
+  f.win.location.hash = '#sql=SECRET';
+  assert.equal(f.initialize(() => assert.fail('SQL を再適用した')), false);
+  f.listeners.hashchange();
+  assert.equal(f.win.location.hash, '');
+  assert.equal(f.scripts.length, 1);
+});
+
+test('analytics: ハッシュ除去に失敗したら beacon を挿入しない', () => {
+  const f = analyticsFixture();
+  f.win.history.replaceState = () => { throw new Error('blocked'); };
+  assert.equal(f.initialize(), false);
+  assert.equal(f.scripts.length, 0);
+});
+
+test('analytics: ハッシュ無しでも beacon は一度だけ挿入する', () => {
+  const f = analyticsFixture('test-token', '');
+  assert.equal(f.initialize(), true);
+  assert.equal(f.initialize(), false);
+  assert.deepEqual(f.events, ['inject']);
+});
+
+test('analytics: SQL 読込中に例外が起きてもハッシュを除去し beacon は挿入しない', () => {
+  const f = analyticsFixture();
+  assert.throws(() => f.initialize(() => { throw new Error('read failed'); }), /read failed/);
+  assert.equal(f.win.location.hash, '');
+  assert.equal(f.scripts.length, 0);
 });
 
 test('node-sql-parserのライセンス（Apache-2.0）が同梱されている', () => {

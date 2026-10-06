@@ -14,7 +14,7 @@
 <meta property="og:description" content="本番SQLを手作業で実行する前に、UPDATE/DELETEのWHERE忘れ・全件更新・TRUNCATEを日本語の一文で読み返して確かめるブラウザツール。検算SELECT自動生成。SQLは外部送信されません。">
 <meta property="og:locale" content="ja_JP">
 <meta name="twitter:card" content="summary">
-<meta http-equiv="Content-Security-Policy" content="default-src 'self'; script-src 'self'; style-src 'self'; connect-src 'none'; form-action 'none'">
+<meta http-equiv="Content-Security-Policy" content="default-src 'self'; script-src 'self' https://static.cloudflareinsights.com/beacon.min.js; style-src 'self'; connect-src https://cloudflareinsights.com/cdn-cgi/rum; form-action 'none'">
 <link rel="stylesheet" href="css/style.css?v=20260920-why">
 </head>
 <body>
@@ -35,7 +35,7 @@
 
   <section class="privacy-banner" aria-label="プライバシーについて" data-i18n-aria="ui.privacyAria">
     <span class="privacy-icon" aria-hidden="true">🔒</span>
-    <p data-i18n="ui.privacy">入力されたSQLは<strong>ブラウザ内だけで処理</strong>し、AIサービスを含む外部へ送信しません。チェックにはLLM（生成AI）を使わず、SQLの<strong>構文解析と規則</strong>で判定します。サーバーもインストールも不要です。</p>
+    <p data-i18n="ui.privacy">入力されたSQLは<strong>ブラウザ内だけで処理</strong>し、AIサービスを含む外部へ送信しません。チェックにはLLM（生成AI）を使わず、SQLの<strong>構文解析と規則</strong>で判定します。サーバーもインストールも不要です。アクセス数の集計のため Cloudflare Web Analytics を読み込み、ページの表示回数と表示性能の情報だけを送ります（Cookie は使わず、入力した SQL や URL の `#sql=` 部分は送信しません）。</p>
   </section>
 
   <section class="panel input-panel">
@@ -170,6 +170,8 @@
 <script src="js/dialect-detect.js"></script>
 <script src="js/dml-builder.js"></script>
 <script src="js/templates.js"></script>
+<script src="js/analytics-config.js"></script>
+<script src="js/analytics.js"></script>
 <script src="js/app.js"></script>
 </body>
 </html>

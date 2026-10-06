@@ -17,7 +17,7 @@ SQLMegane から入力 SQL が AI サービスを含む外部サービスへ渡�
 v2 から、MySQL / PostgreSQL / SQL Server については本物のSQLパーサ
 （[node-sql-parser](https://github.com/taozhi8833998/node-sql-parser) / Apache-2.0 / 同梱）で
 構文解析（AST）を行い、日本語要約とAST基盤の検出を提供します。
-パーサはページに同梱しており、**実行時にCDN等の外部から読み込むことはありません**。
+パーサはページに同梱しており、**CDNからは読み込みません**。唯一の外部リソースは、アクセス数を集計する Cloudflare Web Analytics の beacon です（トークン設定時のみ有効）。Cookie は使わず、入力 SQL や URL の `#sql=` 部分は送信しません。 `#sql=` のハッシュはページが読み取った直後に URL から取り除いてから beacon を読み込みます。加えて、現行の beacon（2026.10 時点）が送信 URL と referrer からハッシュを除去することを実物で確認しています（Cloudflare 側の実装に依存する点は、更新時に再確認します）。
 
 ## 起動方法
 
@@ -242,7 +242,7 @@ node cli/sqlmegane.mjs template --kind upsert --dialect postgres --lang ja
 - 文ごとのカード表示（危険度バッジ付き）
 - **検算SELECTの自動生成**: UPDATE/DELETE文から `SELECT COUNT(*) FROM テーブル WHERE 同条件;` を自動生成し、コピーボタンで即座に控えられます（テーブルエイリアスが使われている場合は `FROM テーブル alias` の形でエイリアスも引き継ぎ、そのまま実行できるようにします）
 - 危険が検出されなかった場合も「検出できない危険もあります」という文言で過信を防止
-- プライバシー表記の常時表示（実際に外部通信・アナリティクスは一切実装していません）
+- プライバシー表記の常時表示（入力 SQL は外部送信せず、トークン設定時のみ Cloudflare Web Analytics でアクセス数を集計。Cookie は使わず、URL の `#sql=` 部分も送信しません）
 - チーム版（構想）への興味・意見・誤検知/検出漏れの報告はGitHub Issueで受け付け（リンクボタンから直接遷移）
 
 ## 検出ルール一覧
@@ -350,8 +350,9 @@ node cli/sqlmegane.mjs template --kind upsert --dialect postgres --lang ja
 **CSPについて**: `index.html` の `Content-Security-Policy` メタタグ（`script-src 'self'` など）は
 このESM廃止にあたって変更していない。`file://` で直接開いた状態でheadless Chromeを使って
 実機検証したところ、`script-src 'self'` は同一ディレクトリ配下の通常の `<script src="...">` を
-問題なくロードでき、CSP違反やCORSエラーは発生しなかった。したがって `connect-src 'none'` /
-`form-action 'none'` を含む既存の保護方針はそのまま維持している。
+問題なくロードでき、CSP違反やCORSエラーは発生しなかった。現在はアクセス集計のため、
+`script-src` に Cloudflare の beacon URL、`connect-src` に集計送信先
+`https://cloudflareinsights.com/cdn-cgi/rum` のみを許可している。`form-action 'none'` は維持している。
 
 ## ディレクトリ構成
 

@@ -17,7 +17,7 @@ It is an early-stage tool and feedback is welcome. See [Author](#author) for who
 - Open **https://selene-nyx-ai.github.io/sqlmegane/en/** and paste SQL. No sign-up, no install.
 - Or clone the repository and double-click `en/index.html`. It works from `file://` and offline; there is no build step and no server.
 
-SQL analysis makes no network requests and stays in the browser. The app has no analytics or telemetry (see [Privacy & how it runs](#privacy--how-it-runs)).
+SQL analysis makes no network requests and stays in the browser. When a token is configured, Cloudflare Web Analytics aggregates page counts without cookies; SQL and the URL's `#sql=` fragment are never sent (see [Privacy & how it runs](#privacy--how-it-runs)).
 
 ### Links with SQL (“try this SQL” from an article)
 
@@ -204,7 +204,7 @@ Keep using the database, IDE, review, and linting safeguards that fit your workf
 1. **Readback, not just a block.** It turns the statement into one sentence ("updates rows in `m_users` where `last_login` < '2024-01-01', setting `status` = 'INACTIVE'") so you can compare it with what you meant. Missing-WHERE detection is table stakes; the sentence is where wrong-range mistakes get noticed. The readback is generated deterministically from an AST, without an LLM, and does not require sending SQL to a service. For a given version and selected dialect, the output is repeatable, although parser and rule limitations can still produce an incorrect or incomplete reading.
 2. **"WHERE is there but it is still wrong" patterns.** `1=1` left from debugging, `OR 1=1` at the top level, an outer join cancelled by the WHERE clause, `NOT IN` with a NULL, DML hidden inside a PL/SQL package body, TRUNCATE where DELETE was meant.
 3. **A verification SELECT you can paste right away**, generated from the same parsed WHERE clause and FROM source, including aliases and JOINs.
-4. **Nothing to install, nothing to send.** A static browser app that works from a cloned directory over `file://`, no server, no account, no CDN, and a CLI that uses the same core with no dependencies beyond Node.js.
+4. **Nothing to install, nothing to send.** A static browser app that works from a cloned directory over `file://`, no server, no account, a bundled parser, and a CLI that uses the same core with no dependencies beyond Node.js.
 
 ## CLI
 
@@ -289,9 +289,9 @@ After running: compare the affected-row count with the verification count; recor
 
 ## Privacy & how it runs
 
-- **SQL analysis makes no network requests.** There is no server component and no account. The app has no analytics or telemetry. Its `Content-Security-Policy` (`default-src 'self'; script-src 'self'; style-src 'self'; connect-src 'none'; form-action 'none'`) blocks network connections and form submissions; user-initiated navigation through ordinary links (for example to GitHub) still works.
+- **SQL analysis makes no network requests.** There is no server component and no account. When a token is configured, Cloudflare Web Analytics aggregates page counts without cookies; SQL and the URL's `#sql=` fragment are never sent. The hash is read and immediately removed before loading the beacon (we also verified that the current beacon, as of 2026-10, strips hashes from the reported URL and referrer; this depends on Cloudflare's implementation and is re-checked on updates), and later hash changes are also removed without reloading the beacon. The `Content-Security-Policy` permits only the Cloudflare beacon script and its `https://cloudflareinsights.com/cdn-cgi/rum` endpoint as external resources, and blocks form submissions; user-initiated navigation through ordinary links (for example to GitHub) still works.
 - **Works from `file://`.** Opening `index.html` or `en/index.html` by double-clicking is the primary use case. Earlier versions used ES modules, which browsers block under `file://` (the page looked fine but nothing happened on "Analyze"), so the scripts were changed to plain `<script src>` files that expose their API on `globalThis`. The CSP above was verified to load them under `file://` without violations.
-- **No CDN.** The SQL parser is bundled in `js/vendor/`; nothing is fetched at runtime.
+- **Bundled parser.** The SQL parser is bundled in `js/vendor/` and is never loaded from a CDN. The only external resource is the optional Cloudflare Web Analytics beacon for aggregate page counts, with no cookies and no SQL or `#sql=` fragment sent.
 - **Bundled parser:** [node-sql-parser](https://github.com/taozhi8833998/node-sql-parser) v5.4.0, Apache-2.0 (full license text in `js/vendor/LICENSE-node-sql-parser`). The upstream UMD payloads are unchanged. The build script wraps each payload in an IIFE so the dialect builds do not overwrite one another's global `Parser`. About 890 KB in total for the three dialects (about 184 KB gzipped).
 - **The English page** `en/index.html` is generated from `index.html` and the English messages in `js/i18n.js` by `node tools/build-en.mjs`; the analysis code is identical.
 - Tests: `node tests/run-tests.mjs` (plain `assert`, no external dependencies; includes the CLI's output and exit codes).
