@@ -66,6 +66,41 @@ DELETE: `t_log` の全行を削除します
 検算SELECT: SELECT COUNT(*) FROM t_log;
 ```
 
+### Claude Code のフックに噛ませる例（AI が流す SQL を実行前に一度止める）
+
+AI コーディングエージェントが `psql` / `mysql` や DB の MCP サーバー経由で SQL を流す運用では、Claude Code の [PreToolUse フック](https://code.claude.com/docs/en/hooks)から上の CLI を呼べます。[examples/claude-code-hook.mjs](examples/claude-code-hook.mjs) はその例で、Bash / MCP ツールの入力から取り出せた SQL を CLI で解析し、設定した重大度以上の指摘があれば、そのツール呼び出しを拒否します。本番・開発の接続先は区別しません。SQL の抽出と検出ルールには制限があり、すべての SQL 実行を監視するものではありません。製品コードには手を入れておらず、CLI を `--json` で呼ぶだけの薄いスクリプトなので、自分の運用に合わせて書き換える前提で置いています。
+
+`~/.claude/settings.json`（全プロジェクト）または `<プロジェクト>/.claude/settings.json` に追加します（パスは置いた場所の絶対パスに。空白を含むパスも `args` なら引用の心配がありません）:
+
+```json
+{
+  "hooks": {
+    "PreToolUse": [
+      {
+        "matcher": "Bash|mcp__.*",
+        "hooks": [
+          { "type": "command", "command": "node", "args": ["/absolute/path/to/sqlmegane/examples/claude-code-hook.mjs"] }
+        ]
+      }
+    ]
+  }
+}
+```
+
+- 見るもの: Bash ツールのコマンドのうち、`psql` / `mysql` / `mariadb` / `sqlcmd` / `sqlplus` を先頭に呼ぶ**単純な 1 コマンド**から、`-c "SQL"` / `-e "SQL"` / `-Q "SQL"`（`--command=` / `--execute=`、`-c"SQL"` の直結も）、ヒアドキュメント、`< ファイル` のリダイレクト（cwd 基準で読む）で渡される SQL。MCP ツール（`mcp__サーバー名__ツール名`）の入力にある `sql` / `query` / `statement` / `statements` の文字列、または文字列の配列
+- 判定: 閾値（既定 danger、環境変数 `SQLMEGANE_FAIL_ON` で `warning` / `info` に変更可）以上の指摘が 1 つでもあれば `permissionDecision: "deny"` を返し、指摘の内容を理由としてエージェントに戻します。DB クライアントを呼ぶコマンドなのに、このフックが対応していないシェルの形（複合コマンド `;` `&&` `|`、変数・コマンド置換 `$VAR` `$(...)`、引用符の連結、`cd` を含むもの、引用符なしヒアドキュメント内の `$`、読めない入力ファイル）で SQL を取り出せないときは `"ask"`（人が確認）。CLI が解析できなかったときも `"ask"`。複数の SQL があれば deny > ask の順で集約します。SQL が見えない呼び出しや指摘が閾値未満のときは何も出力せず、通常の許可フローに渡します。方言は `SQLMEGANE_DIALECT`（既定 `auto`）
+- **見えないもの**: DB クライアント名を含まない Bash コマンド、`-f ファイル` やパイプ入力、アプリケーションのコードやマイグレーションツール・スクリプトの内部で組み立てられる SQL、PowerShell ツール（matcher にも含めていません）、MCP 入力のネストしたオブジェクト内の SQL。これらは判定せずに通ります。読み込んだ入力ファイルが検査後に書き換わる可能性もあります。**フックを通過したことは「このフックから deny が返らなかった」という意味で、SQL を検査できたことや安全を意味しません**。止められるのは SQLMegane の実装済みルール（下の「検出ルール一覧」）に当たる文だけで、条件が付いていても業務的に間違っている SQL は通ります。読み取り専用ロールや接続先の分離など、権限側の対策の代わりにはなりません
+- フック自体が起動できない（Node が無い・パスが違う）・タイムアウトした場合は、既定では判定されずに通常の許可フローへ戻ります。Claude Code 2.1.295 以降ならフック設定に `"onFailure": "block"` を足すと、その場合も呼び出しを止められます（stdin の JSON を読めなかった分岐は、このスクリプトが無出力・exit 0 で終わるため止まりません）
+- このスクリプト自体にはネットワーク送信処理が無く、解析は同じマシンの CLI で行います。ただし指摘文・エラー文は Claude Code に返されるので、SQL 由来の識別子・条件値やローカルパスが含まれる場合があり、Claude Code 側で記録・送信される可能性があります
+
+動作例（Claude Code 2.1.278 の Bash ツールで `psql -h localhost -U test testdb -c "UPDATE t_test SET flag = 1"` を実行しようとした時、フックが返した JSON の `permissionDecisionReason`。呼び出しは実行されず、エージェントには `PreToolUse:Bash hook error:` に続けてこの文が渡りました）:
+
+```
+SQLMegane が実行前の SQL に【危険】以上の指摘を見つけたため、この呼び出しを止めました。内容を見直してから、必要なら人が実行してください。
+- #1 UPDATE: WHERE句のないUPDATE: WHERE句が見つかりません。このままではテーブルの全行が更新されます。想定通りであっても、WHERE句を明示するか、下記の検算SELECTで対象件数を確認してから実行することを強く推奨します。
+（この判定は SQLMegane の実装済みルールと、このフックが取り出せた SQL の範囲に限られ、通過しても安全を保証するものではありません）
+```
+
 ### 実行前チェックリスト
 
 ツールを使わない場合も含めた手作業運用向けのチェックリストを [CHECKLIST.md](CHECKLIST.md) に置いています。チームの手順書にコピーして使ってください。
