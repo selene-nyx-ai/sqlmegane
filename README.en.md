@@ -257,6 +257,43 @@ Two things to keep in mind:
 - **Some SQL content is in the output even without `--include-sql`.** The summary, the findings and the verification SELECT contain table names, column names and WHERE literals (e-mail addresses, IDs, ...), because that is what a readback is. Check who can read your CI logs.
 - **The CLI does not certify a statement as safe.** Only the implemented rules are checked, and by default anything below `danger` passes. A green exit code means "none of the known patterns matched", nothing more.
 
+### Claude Code hook example (stop AI-written SQL once before it runs)
+
+When an AI coding agent sends SQL to a database through `psql` / `mysql` or a database MCP server, you can call the CLI from a Claude Code [PreToolUse hook](https://code.claude.com/docs/en/hooks). [examples/claude-code-hook.mjs](examples/claude-code-hook.mjs) is such an example: it takes the SQL it can extract from a Bash or MCP tool input, runs the CLI on it, and denies the tool call when there is a finding at or above the configured severity. It does not distinguish production from development connections. SQL extraction and the detection rules have limits, so it does not watch every SQL execution. The product code is untouched; the hook is a thin script that calls the CLI with `--json`, and it is meant to be read and adapted to your own setup.
+
+Add this to `~/.claude/settings.json` (all projects) or `<project>/.claude/settings.json`. Use the absolute path of the cloned repository; with `args` a path containing spaces needs no quoting. Set `SQLMEGANE_LANG=en` in the environment of the Claude Code process to get the reasons in English (default `ja`):
+
+```json
+{
+  "hooks": {
+    "PreToolUse": [
+      {
+        "matcher": "Bash|mcp__.*",
+        "hooks": [
+          { "type": "command", "command": "node", "args": ["/absolute/path/to/sqlmegane/examples/claude-code-hook.mjs"] }
+        ]
+      }
+    ]
+  }
+}
+```
+
+- **What it looks at**: in the Bash tool, a **simple single command** that starts with `psql` / `mysql` / `mariadb` / `sqlcmd` / `sqlplus`, taking the SQL from `-c "SQL"` / `-e "SQL"` / `-Q "SQL"` (also `--command=` / `--execute=` and the attached form `-c"SQL"`), a here-document, or a `< file` redirection (read relative to cwd). In MCP tools (`mcp__server__tool`), the `sql` / `query` / `statement` / `statements` fields of the input, as a string or an array of strings
+- **Decision**: if any finding is at or above the threshold (default `danger`; `SQLMEGANE_FAIL_ON` accepts `warning` / `info`), the hook returns `permissionDecision: "deny"` with the findings as the reason, which goes back to the agent. If the command calls a database client but uses a shell form the hook does not support (compound commands `;` `&&` `|`, variable or command substitution `$VAR` `$(...)`, concatenated quotes, anything containing `cd`, `$` inside an unquoted here-document, an unreadable input file), the hook returns `"ask"` (a person confirms). It also returns `"ask"` when the CLI cannot parse the SQL. With several statements, deny wins over ask. When no SQL is visible, or the findings are below the threshold and the extra `"ask"` condition below does not apply, the hook prints nothing and the call goes through the normal permission flow. The dialect is `SQLMEGANE_DIALECT` (default `auto`); the language of the reasons is `SQLMEGANE_LANG` (`ja` / `en`, default `ja`)
+- **UPDATE / DELETE whose affected range this hook cannot confirm are `"ask"`** (added 2026-10-22): even when the findings are below the threshold, an UPDATE / DELETE whose WHERE clause cannot be recognised as a combination of `column = value`, `column IN (value, ...)`, AND and parentheses is sent to `"ask"`, together with the verification SELECT the CLI generates. The point is not to silently pass statements like `WHERE id > 0` or `WHERE id IS NOT NULL`, which are not syntactically "always true" but can still cover every row. This branch exists to let the limited supported syntax through without an extra confirmation; expressions that cannot be recognised as a column reference (such as `CURRENT_DATE`), conditions whose meaning depends on the dialect or quoting rules (`"..."` in mysql), column-to-column comparisons, OR, NOT, `<` `>` `<>`, LIKE, IS, BETWEEN, subqueries, function calls, and some number or identifier notations (`(1)`, unquoted non-ASCII column names) go to `"ask"`. It does not judge the actual row count or safety (`WHERE status = 'active'` passes even when it matches many rows). The attached verification SELECT has its whitespace normalised by the CLI and is not the original text, so check that its condition matches the original SQL before using it. `SQLMEGANE_ASK_WIDE_WHERE=off` disables this. It was added after a reader of the Japanese article pointed out, with reproduction inputs, that the deny reason works as a specification for the agent's next attempt: blocked on `WHERE 1=1`, it can retry with `WHERE id > 0` and pass
+- Deny reasons are shown to Claude. Ask reasons are shown to the user in the permission prompt; in non-interactive runs where the prompt cannot be answered and the call is denied, Claude receives the reason in the tool result. Reasons available to the agent may become hints for rewriting the SQL and retrying. This example keeps no state between calls and does not control retries. Operationally, write in CLAUDE.md or similar: "when the hook returns deny or ask, do not rewrite the SQL and retry; ask a person". That instruction alone does not reliably prevent retries, and hiding the reason would not guarantee it either
+- **What it cannot see**: Bash commands that do not contain a database client name, `-f file` input, SQL built inside application code, migration tools or scripts, the PowerShell tool (not in the matcher either), and SQL nested inside objects in MCP input. These pass without a decision. SQL supplied through a pipe is not extracted either, but a Bash command containing a recognised database client name and an unquoted pipe operator returns `"ask"`. An input file read by the hook can also change after the check. **Passing the hook means "this hook did not return deny", not that the SQL was inspected or is safe**. Deny is based on the implemented rules (see "What it catches" above); unsupported inputs and conditions go to `"ask"`. SQL that has a WHERE clause but is wrong for the business passes. It is not a substitute for a read-only role or separated connections; it is one more check in front of them
+- If the hook itself cannot start (no Node, wrong path) or times out, by default no decision is made and the call falls back to the normal permission flow. On Claude Code 2.1.295 or later, add `"onFailure": "block"` to the hook entry to stop the call in that case as well (the branch where the script cannot read the stdin JSON exits 0 with no output, so it is not stopped)
+- The script has no network code; analysis runs in the CLI on the same machine. The findings and error messages are returned to Claude Code, though, and may contain identifiers, condition values and local paths from the SQL, which Claude Code may record or send
+
+Example: feeding the hook the JSON it would receive for a Bash call of `psql -h localhost -U test testdb -c "UPDATE t_test SET flag = 1"` with `SQLMEGANE_LANG=en` returns the `permissionDecisionReason` below (hook output as of 2026-10-23; the same deny with the Japanese messages was confirmed inside Claude Code 2.1.278, where the call was not executed and the reason reached the agent as `PreToolUse:Bash hook error:`):
+
+```
+SQLMegane found a finding at [DANGER] or above in the SQL about to run, so this call was blocked. Do not rewrite the SQL and retry; ask a person to review it.
+- #1 UPDATE: UPDATE without a WHERE clause: No WHERE clause was found. This updates every row in the table. Confirm the affected rows with the verification SELECT before running it.
+(This decision covers only the rules SQLMegane implements and the SQL this hook could extract. Passing the hook does not mean the SQL is safe.)
+```
+
 ## Pre-run checklist
 
 [CHECKLIST.md](CHECKLIST.md) (Japanese) is a checklist for running UPDATE / DELETE / TRUNCATE by hand against production, written to work with or without this tool, MIT-licensed so you can copy it into your team's runbook. In short:

@@ -17,6 +17,7 @@
 // 環境変数:
 //   SQLMEGANE_DIALECT  auto|generic|mysql|postgres|mssql|oracle（既定 auto）
 //   SQLMEGANE_FAIL_ON  danger|warning|info（既定 danger）
+//   SQLMEGANE_LANG     ja|en（既定 ja）: deny / ask の理由文と CLI の指摘文の言語（2026-10-23 追加）
 //   SQLMEGANE_ASK_WIDE_WHERE  on|off（既定 on）: 閾値未満でも、WHERE を「列 = 値」「列 IN (値, ...)」と AND・括弧の組み合わせとして
 //                      判定できない UPDATE / DELETE を permissionDecision "ask"（人が確認）に回す。
 //                      `WHERE id > 0` や `WHERE id IS NOT NULL` のように構文上は「常に真」でなくても全行が対象になり得る文を、
@@ -32,7 +33,7 @@
 //   2. MCP ツール（tool_name が mcp__ で始まる）: tool_input の `sql` / `query` / `statement` / `statements` の文字列、または文字列の配列
 // 次は「対応外」として permissionDecision "ask"（人が確認）を返す: 複合コマンド（; && || | 改行）、変数・コマンド置換（$VAR $(...) `...`）、
 // 引用符の連結、`cd` を含むもの、引用符なしのヒアドキュメント内の `$`、読めない入力ファイル。
-// 次は見えないので何も判定せず exit 0 で通常の許可フローに渡す: DB クライアント名を含まない Bash コマンド、`-f ファイル`・パイプ入力、
+// 次は見えないので何も判定せず exit 0 で通常の許可フローに渡す: DB クライアント名を含まない Bash コマンド、`-f ファイル` の入力、
 // アプリやスクリプト内部で組み立てられる SQL、PowerShell ツール、MCP 入力のネストしたオブジェクト内の SQL。
 // **フックを通過しても、SQL を検査できたことや安全性を意味しない**。検出できるのは SQLMegane の実装済みルール（README「検出ルール一覧」）だけ。
 // deny / ask の理由文は Claude Code（エージェント）に渡る。この例は呼び出し間の状態を保持せず、再試行そのものは制御しない。
@@ -53,6 +54,24 @@ const SEVERITIES = ['danger', 'warning', 'info'];
 const DIALECT = process.env.SQLMEGANE_DIALECT || 'auto';
 const FAIL_ON = process.env.SQLMEGANE_FAIL_ON || 'danger';
 const ASK_WIDE_WHERE = process.env.SQLMEGANE_ASK_WIDE_WHERE || 'on';
+const LANG = process.env.SQLMEGANE_LANG || 'ja';
+const LANGS = ['ja', 'en'];
+// 理由文の言語切り替え（ja / en）。CLI の指摘文は --lang で、このスクリプト固有の文はここで切り替える
+const tr = (ja, en) => (LANG === 'en' ? en : ja);
+const UNSUPPORTED_EN = {
+  '引用符の連結': 'concatenated quoted strings',
+  '閉じていない引用符': 'an unclosed quote',
+  '変数・コマンド置換': 'variable or command substitution',
+  '複数行のコマンド': 'a multi-line command',
+  '複合コマンド・リダイレクト': 'a compound command or redirection',
+  'ヒアドキュメントの位置': 'a here-document in an unsupported position',
+  '引用符なしのヒアドキュメント内の変数・コマンド置換': 'variable or command substitution inside an unquoted here-document',
+  'ヒアドキュメントの形': 'an unsupported here-document form',
+  '先頭が DB クライアントでないコマンド': 'a command that does not start with the database client',
+  'cd を含むコマンド': 'a command containing cd',
+  'リダイレクト先が無い': 'a redirection without a target',
+  '入力ファイルを読めない': 'an input file that could not be read',
+};
 const CLIENT_RE = /\b(psql|mysql|mariadb|sqlcmd|sqlplus)\b/;
 const SQL_FLAGS_SHORT = ['-c', '-e', '-Q'];
 const SQL_FLAGS_LONG = ['--command', '--execute'];
@@ -165,7 +184,7 @@ function sqlFromMcp(toolInput) {
 }
 
 function analyze(sql) {
-  return spawnSync(process.execPath, [CLI, '--json', '--dialect', DIALECT, '--fail-on', FAIL_ON, '-'], {
+  return spawnSync(process.execPath, [CLI, '--json', '--lang', LANG, '--dialect', DIALECT, '--fail-on', FAIL_ON, '-'], {
     input: sql, encoding: 'utf8', timeout: 20000,
   });
 }
@@ -275,9 +294,12 @@ function wideDml(json) {
     } catch { ok = false; } // 判定処理の例外も ask に集約する
     if (!ok) {
       lines.push(
-        `- #${st.number} ${st.kind}: このフックでは対象範囲を確認できませんでした。SQL を書き換えて再試行せず、人に確認してください。` +
+        tr(`- #${st.number} ${st.kind}: このフックでは対象範囲を確認できませんでした。SQL を書き換えて再試行せず、人に確認してください。`,
+          `- #${st.number} ${st.kind}: this hook could not confirm the affected range. Do not rewrite the SQL and retry; ask a person to review it.`) +
         (typeof st.verifySelect === 'string'
-          ? `\n  件数確認用の参考 SELECT（元の SQL の条件と一致するか確認してから使ってください）:\n  ${st.verifySelect.trim().replace(/\n/g, '\n  ')}`
+          ? tr('\n  件数確認用の参考 SELECT（元の SQL の条件と一致するか確認してから使ってください）:\n  ',
+            '\n  Reference SELECT for counting rows (check that its condition matches the original SQL before using it):\n  ') +
+            st.verifySelect.trim().replace(/\n/g, '\n  ')
           : ''),
       );
     }
@@ -291,11 +313,14 @@ function emit(decision, reason) {
   }) + '\n');
 }
 
-const NOTE = '（この判定は SQLMegane の実装済みルールと、このフックが取り出せた SQL の範囲に限られ、通過しても安全を保証するものではありません）';
+const NOTE = tr('（この判定は SQLMegane の実装済みルールと、このフックが取り出せた SQL の範囲に限られ、通過しても安全を保証するものではありません）',
+  '(This decision covers only the rules SQLMegane implements and the SQL this hook could extract. Passing the hook does not mean the SQL is safe.)');
 
 function main() {
-  if (!DIALECTS.includes(DIALECT) || !SEVERITIES.includes(FAIL_ON) || !['on', 'off'].includes(ASK_WIDE_WHERE)) {
-    emit('ask', `フックの環境変数が不正です（SQLMEGANE_DIALECT=${DIALECT}, SQLMEGANE_FAIL_ON=${FAIL_ON}, SQLMEGANE_ASK_WIDE_WHERE=${ASK_WIDE_WHERE}）。設定を直すまで SQL は人が確認してください。`);
+  if (!DIALECTS.includes(DIALECT) || !SEVERITIES.includes(FAIL_ON) || !['on', 'off'].includes(ASK_WIDE_WHERE) || !LANGS.includes(LANG)) {
+    const vars = `SQLMEGANE_DIALECT=${DIALECT}, SQLMEGANE_FAIL_ON=${FAIL_ON}, SQLMEGANE_ASK_WIDE_WHERE=${ASK_WIDE_WHERE}, SQLMEGANE_LANG=${LANG}`;
+    emit('ask', tr(`フックの環境変数が不正です（${vars}）。設定を直すまで SQL は人が確認してください。`,
+      `The hook's environment variables are invalid (${vars}). Until the settings are fixed, have a person review the SQL.`));
     return;
   }
   let input;
@@ -309,7 +334,11 @@ function main() {
     else if (toolName.startsWith('mcp__')) sqls = sqlFromMcp(input.tool_input);
   } catch (err) {
     if (err instanceof Unsupported) {
-      emit('ask', `DB クライアントを呼ぶコマンドですが、このフックが対応していないシェルの形（${err.message}）のため SQL を取り出せませんでした。SQL を人が確認してください。`);
+      const why = LANG === 'en'
+        ? (UNSUPPORTED_EN[err.message] || (err.message.startsWith('入力ファイルを読めない') ? `${UNSUPPORTED_EN['入力ファイルを読めない']}: ${err.message.slice('入力ファイルを読めない: '.length)}` : err.message))
+        : err.message;
+      emit('ask', tr(`DB クライアントを呼ぶコマンドですが、このフックが対応していないシェルの形（${why}）のため SQL を取り出せませんでした。SQL を人が確認してください。`,
+        `This command calls a database client, but the hook could not extract the SQL because of a shell form it does not support (${why}). Have a person review the SQL.`));
       return;
     }
     throw err;
@@ -321,22 +350,32 @@ function main() {
   const errors = [];
   for (const sql of sqls) {
     const r = analyze(sql);
-    if (r.error || r.status === null) errors.push(`SQLMegane の CLI を実行できませんでした（${r.error ? r.error.message : 'timeout'}）。`);
-    else if (r.status === 2) { const lines = describe(r.stdout); problems.push(lines.length ? lines.join('\n') : '（指摘の詳細を取り出せませんでした）'); }
-    else if (r.status !== 0) errors.push(`SQLMegane が終了コード ${r.status} で終了しました: ${(r.stderr || '').trim().slice(0, 300)}`);
-    else if (ASK_WIDE_WHERE === 'on') wide.push(...wideDml(r.stdout));
+    if (r.error || r.status === null) {
+      const cause = r.error ? r.error.message : 'timeout';
+      errors.push(tr(`SQLMegane の CLI を実行できませんでした（${cause}）。`, `The SQLMegane CLI could not be run (${cause}).`));
+    } else if (r.status === 2) {
+      const lines = describe(r.stdout);
+      problems.push(lines.length ? lines.join('\n') : tr('（指摘の詳細を取り出せませんでした）', '(The details of the findings could not be extracted.)'));
+    } else if (r.status !== 0) {
+      const tail = (r.stderr || '').trim().slice(0, 300);
+      errors.push(tr(`SQLMegane が終了コード ${r.status} で終了しました: ${tail}`, `SQLMegane exited with code ${r.status}: ${tail}`));
+    } else if (ASK_WIDE_WHERE === 'on') wide.push(...wideDml(r.stdout));
   }
   if (problems.length) {
+    const level = FAIL_ON === 'danger' ? tr('危険', 'DANGER') : FAIL_ON === 'warning' ? tr('警告', 'WARNING') : tr('情報', 'INFO');
     emit('deny',
-      `SQLMegane が実行前の SQL に【${FAIL_ON === 'danger' ? '危険' : FAIL_ON === 'warning' ? '警告' : '情報'}】以上の指摘を見つけたため、この呼び出しを止めました。` +
-      `SQL を書き換えて再試行せず、人に確認してください。\n${problems.join('\n')}\n${NOTE}`);
+      tr(`SQLMegane が実行前の SQL に【${level}】以上の指摘を見つけたため、この呼び出しを止めました。SQL を書き換えて再試行せず、人に確認してください。`,
+        `SQLMegane found a finding at [${level}] or above in the SQL about to run, so this call was blocked. Do not rewrite the SQL and retry; ask a person to review it.`) +
+      `\n${problems.join('\n')}\n${NOTE}`);
   } else if (wide.length || errors.length) {
     const parts = [];
     if (wide.length) {
-      parts.push('このフックでは UPDATE / DELETE の対象範囲を確認できませんでした。SQL を書き換えて再試行せず、' +
-        '元の SQL・対象データ・接続先を人が確認して実行の可否を判断してください。\n' + wide.join('\n'));
+      parts.push(tr('このフックでは UPDATE / DELETE の対象範囲を確認できませんでした。SQL を書き換えて再試行せず、' +
+        '元の SQL・対象データ・接続先を人が確認して実行の可否を判断してください。\n',
+      'This hook could not confirm the affected range of an UPDATE / DELETE. Do not rewrite the SQL and retry; ' +
+        'a person should review the original SQL, the target data and the connection, and decide whether to run it.\n') + wide.join('\n'));
     }
-    if (errors.length) parts.push(errors.join('\n') + '\nSQL を人が確認してください。');
+    if (errors.length) parts.push(errors.join('\n') + tr('\nSQL を人が確認してください。', '\nHave a person review the SQL.'));
     emit('ask', `${parts.join('\n')}\n${NOTE}`);
   }
 }
