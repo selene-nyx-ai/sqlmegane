@@ -294,6 +294,10 @@ SQLMegane found a finding at [DANGER] or above in the SQL about to run, so this 
 (This decision covers only the rules SQLMegane implements and the SQL this hook could extract. Passing the hook does not mean the SQL is safe.)
 ```
 
+If you have tried this hook example, a brief note in [this discussion comment](https://github.com/selene-nyx-ai/sqlmegane/discussions/1#discussioncomment-19158857) would be welcome, whether you kept using it, removed it, or found it did not suit your workflow. Possible topics include your experience using it (setup effort, unexpected `deny` or `ask` decisions, missed detections, or the wording of the explanations), a case where its behavior differed from your expectations (what happened and what you expected), and your environment (optional). Share whichever of these you wish; a single sentence is enough.
+
+This is a public discussion. Use fictional SQL examples, and do not include actual table or column names, actual values used in conditions, connection details, personal information, your organisation, or operational details such as whether you use a production database. If you choose to describe your environment, limit it to OS, Node.js, and Claude Code versions that you can share publicly.
+
 ## Pre-run checklist
 
 [CHECKLIST.md](CHECKLIST.md) (Japanese) is a checklist for running UPDATE / DELETE / TRUNCATE by hand against production, written to work with or without this tool, MIT-licensed so you can copy it into your team's runbook. In short:
