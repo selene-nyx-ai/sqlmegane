@@ -87,6 +87,14 @@ AI コーディングエージェントが `psql` / `mysql` や DB の MCP サ�
 }
 ```
 
+settings.json に足す前に、次の架空の入力でスクリプト単体の動きを確認できます。Bash／Git Bash で、sqlmegane リポジトリのルートから実行します。DB への接続や SQL の実行は行いません。
+
+```sh
+printf '%s\n' '{"tool_name":"Bash","tool_input":{"command":"psql -h localhost testdb -c \"DELETE FROM users\""}}' | node examples/claude-code-hook.mjs
+```
+
+この入力で `"permissionDecision":"deny"` を含む JSON が返れば、単体での起動・解析・応答を確認できています。無出力・終了コード 0 は正常な通過時にも起こるため、それだけでは入力を読めたか判断できません。この DELETE 例で無出力の場合は、入力形式も確認してください。PowerShell で引用が気になる場合は、JSON オブジェクト部分だけを `input.json` に保存して `Get-Content -Raw -Encoding UTF8 .\input.json | node .\examples\claude-code-hook.mjs` の形で渡せます。設定追加後は Claude Code の `/hooks` で設定内容と定義元を確認できます。これは実行成功の確認とは別です。
+
 - 見るもの: Bash ツールのコマンドのうち、`psql` / `mysql` / `mariadb` / `sqlcmd` / `sqlplus` を先頭に呼ぶ**単純な 1 コマンド**から、`-c "SQL"` / `-e "SQL"` / `-Q "SQL"`（`--command=` / `--execute=`、`-c"SQL"` の直結も）、ヒアドキュメント、`< ファイル` のリダイレクト（cwd 基準で読む）で渡される SQL。MCP ツール（`mcp__サーバー名__ツール名`）の入力にある `sql` / `query` / `statement` / `statements` の文字列、または文字列の配列
 - 判定: 閾値（既定 danger、環境変数 `SQLMEGANE_FAIL_ON` で `warning` / `info` に変更可）以上の指摘が 1 つでもあれば `permissionDecision: "deny"` を返し、指摘の内容を理由としてエージェントに戻します。DB クライアントを呼ぶコマンドなのに、このフックが対応していないシェルの形（複合コマンド `;` `&&` `|`、変数・コマンド置換 `$VAR` `$(...)`、引用符の連結、`cd` を含むもの、引用符なしヒアドキュメント内の `$`、読めない入力ファイル）で SQL を取り出せないときは `"ask"`（人が確認）。CLI が解析できなかったときも `"ask"`。複数の SQL があれば deny > ask の順で集約します。SQL が見えない呼び出し、または指摘が閾値未満で次の追加の `"ask"` 条件にも該当しない呼び出しでは、何も出力せず通常の許可フローに渡します。方言は `SQLMEGANE_DIALECT`（既定 `auto`）。理由文の言語は `SQLMEGANE_LANG`（`ja` / `en`、既定 `ja`。2026-10-23 追加）
 - **対象範囲をこのフックで確認できない UPDATE / DELETE は `"ask"`**（2026-10-22 追加）: 指摘が閾値未満でも、WHERE を「列 = 値」「列 IN (値, ...)」と AND・括弧の組み合わせとして判定できない UPDATE / DELETE は、CLI が生成する検算 SELECT を添えて `"ask"` に回します。`WHERE id > 0` や `WHERE id IS NOT NULL` のように、構文上は「常に真」でなくても全行が対象になり得る文を黙って通さないためです。この分岐は、対応する限られた構文を追加確認なしで通常の許可フローへ渡すためのもので、列参照と判定できない式（`CURRENT_DATE` など）や、方言・引用規則によって解釈が変わる条件（mysql の `"..."`）、列どうしの比較・OR・NOT・`<` `>` `<>`・LIKE・IS・BETWEEN・副問い合わせ・関数、一部の数値・識別子表記（`(1)`、引用符なしの非 ASCII 列名など）は `"ask"` に回します。実際の対象行数や安全性は判定しません（`WHERE status = 'active'` のように等価条件でも行数が多い文は通ります）。添える検算 SELECT は CLI が空白を整えたもので原文そのままではないため、元の SQL の条件と一致するか確認してから使ってください。`SQLMEGANE_ASK_WIDE_WHERE=off` で止められます。公開記事のコメントで「deny の理由文が、エージェントにとって次に満たすべき条件の仕様書になり、`WHERE 1=1` で止められた直後に `WHERE id > 0` を付けて再試行すると通る」と指摘を受けて足しました
