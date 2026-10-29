@@ -29,7 +29,11 @@
 // このフックが SQL を取り出せる形:
 //   1. Bash ツール: psql / mysql / mariadb / sqlcmd / sqlplus を呼ぶ「単純な 1 コマンド」のうち、
 //      `-c "SQL"` / `--command="SQL"` / `-e "SQL"` / `--execute="SQL"` / `-Q "SQL"` の引数、
-//      ヒアドキュメント（`psql ... <<'EOF'` ... `EOF`）、`< ファイル` のリダイレクト（cwd 基準で読む）
+//      ヒアドキュメント（`psql ... <<'EOF'` ... `EOF`）、`< ファイル` のリダイレクト（cwd 基準で読む）。
+//      WP-CLI の `wp db query "SQL"` も同じ扱いで、対応するオプション（`wp` 直後の `--path=` `--url=` 等、`query` の後の `--skip-column-names`
+//      `--dbuser=` 等）を除いた最初の位置引数を SQL として読む。後続の位置引数は検査しない。SQL を実行する追加オプション（`--execute=`
+//      `--init-command=`）、PHP 経由（`--exec=` `--require=`）、`--` 区切り、この例で解釈できないオプションは ask（2026-10-29 追加）。
+//      `wp db query` 以外の DB 操作（`wp db import` `wp db cli` 等）や `wp eval` / `wp eval-file` の PHP 内の SQL は見えない
 //   2. MCP ツール（tool_name が mcp__ で始まる）: tool_input の `sql` / `query` / `statement` / `statements` の文字列、または文字列の配列
 // 次は「対応外」として permissionDecision "ask"（人が確認）を返す: 複合コマンド（; && || | 改行）、変数・コマンド置換（$VAR $(...) `...`）、
 // 引用符の連結、`cd` を含むもの、引用符なしのヒアドキュメント内の `$`、読めない入力ファイル。
@@ -71,8 +75,16 @@ const UNSUPPORTED_EN = {
   'cd を含むコマンド': 'a command containing cd',
   'リダイレクト先が無い': 'a redirection without a target',
   '入力ファイルを読めない': 'an input file that could not be read',
+  '対応外の WP-CLI オプション': 'a WP-CLI option this hook does not handle',
 };
 const CLIENT_RE = /\b(psql|mysql|mariadb|sqlcmd|sqlplus)\b/;
+// WP-CLI は `wp db query` だけを DB クライアント呼び出しの候補として扱う（`wp plugin list` 等は SQL が見えないので判定しない）。
+// 候補の検出は語の並びだけ（改行をまたぐ形や `grep wp db query` も候補になり、後段の構文検査で ask になる）
+const WP_RE = /\bwp\b[\s\S]*\bdb\b[\s\S]*\bquery\b/;
+// `wp db query` で読み飛ばしてよいオプション（引用符が付いていても WP-CLI には同じオプションとして渡るので、引用の有無は見ない）。
+// これ以外のオプション（`--execute=` / `--init-command=` のように SQL を実行するもの、`--exec=` / `--require=` の PHP 経由、`--` 区切り、不明なもの）は ask
+const WP_GLOBAL_OPTS = /^--(path|url)=.+$|^--(skip-plugins|skip-themes|skip-packages|quiet|debug|color|no-color|allow-root)(=.*)?$/;
+const WP_QUERY_OPTS = /^--(dbuser|dbpass|default-character-set)=.+$|^--(skip-column-names|defaults|no-defaults|table|batch|raw|silent)$/;
 const SQL_FLAGS_SHORT = ['-c', '-e', '-Q'];
 const SQL_FLAGS_LONG = ['--command', '--execute'];
 
@@ -132,7 +144,7 @@ function splitSimpleCommand(cmd) {
 
 // Bash コマンド文字列から SQL を集める。見えない形は []、対応外は Unsupported。
 function sqlFromBash(command, cwd) {
-  if (!CLIENT_RE.test(command)) return [];
+  if (!CLIENT_RE.test(command) && !WP_RE.test(command)) return [];
   const found = [];
   let head = command;
   // ヒアドキュメント: 1 コマンドの末尾にある <<EOF / <<'EOF' / <<-EOF だけ対応
@@ -147,10 +159,38 @@ function sqlFromBash(command, cwd) {
     throw new Unsupported('ヒアドキュメントの形');
   }
   const words = splitSimpleCommand(head);
-  if (words.length === 0 || !CLIENT_RE.test(words[0].text) || words[0].quoted) throw new Unsupported('先頭が DB クライアントでないコマンド');
+  // WP-CLI: `wp [--全体オプション ...] db query [--オプション ...] [SQL]`。`query` の次に現れる最初のオプション以外の語を SQL とする
+  let wpSqlFrom = -1; // SQL の位置を探し始める語の添字（WP-CLI でなければ -1）
+  if (words.length > 0 && !words[0].quoted && words[0].text === 'wp') {
+    let k = 1;
+    while (k < words.length && !words[k].op && words[k].text.startsWith('-')) {
+      if (!WP_GLOBAL_OPTS.test(words[k].text)) throw new Unsupported(`対応外の WP-CLI オプション: ${words[k].text.split('=')[0]}`);
+      k++;
+    }
+    const sub = words[k];
+    const cmd = words[k + 1];
+    if (!sub || sub.quoted || sub.op || sub.text !== 'db' || !cmd || cmd.quoted || cmd.op || cmd.text !== 'query') {
+      throw new Unsupported('先頭が DB クライアントでないコマンド');
+    }
+    wpSqlFrom = k + 2;
+  } else if (words.length === 0 || !CLIENT_RE.test(words[0].text) || words[0].quoted) {
+    throw new Unsupported('先頭が DB クライアントでないコマンド');
+  }
   if (words.some((w) => w.text === 'cd')) throw new Unsupported('cd を含むコマンド');
+  let wpTaken = false;
   for (let k = 1; k < words.length; k++) {
     const w = words[k];
+    if (wpSqlFrom >= 0) {
+      if (w.op && w.text === '<') { /* 下のリダイレクト処理に渡す */ } else {
+        if (k >= wpSqlFrom) {
+          if (w.text.startsWith('-')) {
+            // 引用符付きでもオプションとして渡るので text だけで判定する。読み飛ばせるものだけ通し、他は ask
+            if (!WP_QUERY_OPTS.test(w.text)) throw new Unsupported(`対応外の WP-CLI オプション: ${w.text.split('=')[0]}`);
+          } else if (!wpTaken) { if (w.text.trim()) found.push(w.text); wpTaken = true; }
+        }
+        continue;
+      }
+    }
     if (w.op && w.text === '<') {
       const p = words[k + 1];
       if (!p || p.op) throw new Unsupported('リダイレクト先が無い');
@@ -334,11 +374,12 @@ function main() {
     else if (toolName.startsWith('mcp__')) sqls = sqlFromMcp(input.tool_input);
   } catch (err) {
     if (err instanceof Unsupported) {
+      const [jaKey, detail] = err.message.includes(': ') ? [err.message.slice(0, err.message.indexOf(': ')), err.message.slice(err.message.indexOf(': ') + 2)] : [err.message, null];
       const why = LANG === 'en'
-        ? (UNSUPPORTED_EN[err.message] || (err.message.startsWith('入力ファイルを読めない') ? `${UNSUPPORTED_EN['入力ファイルを読めない']}: ${err.message.slice('入力ファイルを読めない: '.length)}` : err.message))
+        ? ((UNSUPPORTED_EN[jaKey] || jaKey) + (detail ? `: ${detail}` : ''))
         : err.message;
-      emit('ask', tr(`DB クライアントを呼ぶコマンドですが、このフックが対応していないシェルの形（${why}）のため SQL を取り出せませんでした。SQL を人が確認してください。`,
-        `This command calls a database client, but the hook could not extract the SQL because of a shell form it does not support (${why}). Have a person review the SQL.`));
+      emit('ask', tr(`DB クライアント呼び出しの候補を含むコマンドですが、このフックが対応していない形（${why}）のため SQL を取り出せませんでした。SQL を人が確認してください。`,
+        `This command may call a database client, but the hook could not extract the SQL because of a form it does not support (${why}). Have a person review the SQL.`));
       return;
     }
     throw err;
