@@ -150,6 +150,23 @@ body {
   color: var(--text);
 }
 
+.end-notice {
+  display: flex;
+  align-items: flex-start;
+  gap: 10px;
+  margin: 24px 0 -12px;
+  padding: 12px 16px;
+  border-radius: var(--radius);
+  background: var(--warning-bg);
+  border: 1px solid var(--warning-border);
+  font-size: 0.9rem;
+  color: var(--text);
+}
+
+.end-notice p {
+  margin: 0;
+}
+
 .privacy-banner p {
   margin: 0;
 }

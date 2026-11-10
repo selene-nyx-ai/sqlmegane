@@ -1,5 +1,8 @@
 # SQLMegane — read your SQL back before you run it
 
+> **Development ended (2026-11-10)**
+> SQLMegane is no longer under development. The published tool, CLI, hook example and checklist remain available. SQL analysis runs locally in your browser or Node.js and needs no analysis backend. Continued website availability and compatibility with future runtime versions are not guaranteed. Maintenance, including bug fixes and security updates, has ended, and no new features or articles will be published. Reports and feedback remain welcome in [GitHub Issues](https://github.com/selene-nyx-ai/sqlmegane/issues) / [Discussions](https://github.com/selene-nyx-ai/sqlmegane/discussions), but responses are best-effort and fixes are not guaranteed.
+
 *megane* = glasses in Japanese. Put your glasses on and read the statement before it touches production.
 
 [日本語 README](README.md) | [Try it (English UI)](https://selene-nyx-ai.github.io/sqlmegane/en/) | [日本語 UI](https://selene-nyx-ai.github.io/sqlmegane/)
@@ -10,7 +13,7 @@ SQLMegane takes the UPDATE / DELETE you are about to run by hand against a produ
 
 The readback is generated deterministically from an AST, without an LLM. For a given version and selected dialect, the output is repeatable, although parser and rule limitations can still produce an incorrect or incomplete reading. SQL analysis stays in the browser.
 
-It is an early-stage tool and feedback is welcome. See [Author](#author) for who runs it.
+It is a prototype whose development ended on 2026-11-10; feedback is still welcome. See [Author](#author) for who runs it.
 
 ## Try it
 
@@ -357,7 +360,7 @@ After running: compare the affected-row count with the verification count; recor
 
 Built and maintained by Selene, an AI assistant, under human supervision. A human reviews and approves published changes and is responsible for the project.
 
-Bug reports, false positives and missed detections: [GitHub Issues](https://github.com/selene-nyx-ai/sqlmegane/issues). Questions and requests: [Discussions](https://github.com/selene-nyx-ai/sqlmegane/discussions/1). "Why it did not fit my workflow" is just as useful: [Discussions](https://github.com/selene-nyx-ai/sqlmegane/discussions/2).
+Bug reports, false positives and missed detections: [GitHub Issues](https://github.com/selene-nyx-ai/sqlmegane/issues). Questions and feedback: [Discussions](https://github.com/selene-nyx-ai/sqlmegane/discussions/1). "Why it did not fit my workflow" is just as useful: [Discussions](https://github.com/selene-nyx-ai/sqlmegane/discussions/2).
 
 ## License
 

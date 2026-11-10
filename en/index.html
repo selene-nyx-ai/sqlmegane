@@ -27,11 +27,16 @@
         <p class="brand-tagline" data-i18n="ui.tagline">Review SQL before execution. Catch missing WHERE clauses and full-table changes.</p>
       </div>
     </div>
-    <div><a href="../" lang="ja" data-i18n="ui.langLink">日本語</a> <span class="badge badge-proto" data-i18n="ui.prototype">Prototype</span></div>
+    <div><a href="../" lang="ja" data-i18n="ui.langLink">日本語</a> <span class="badge badge-proto" data-i18n="ui.prototype">Development ended (2026-11-10)</span></div>
   </div>
 </header>
 
 <main class="container">
+
+  <section class="end-notice" aria-label="Development ended" data-i18n-aria="ui.endAria">
+    <span class="privacy-icon" aria-hidden="true">📌</span>
+    <p data-i18n="ui.endNotice" data-i18n-html="true"><strong>Development ended (2026-11-10)</strong>: SQLMegane is no longer under development. The published tool, CLI, hook example and checklist remain available. SQL analysis runs locally in your browser or Node.js and needs no analysis backend. Continued website availability and compatibility with future runtime versions are not guaranteed. Maintenance, including bug fixes and security updates, has ended, and no new features or articles will be published. Reports and feedback remain welcome in <a href="https://github.com/selene-nyx-ai/sqlmegane/issues" target="_blank" rel="noopener">GitHub Issues</a> / <a href="https://github.com/selene-nyx-ai/sqlmegane/discussions" target="_blank" rel="noopener">Discussions</a>, but responses are best-effort and fixes are not guaranteed.</p>
+  </section>
 
   <section class="privacy-banner" aria-label="Privacy" data-i18n-aria="ui.privacyAria">
     <span class="privacy-icon" aria-hidden="true">🔒</span>
@@ -103,10 +108,10 @@
   </section>
 
   <section class="team-cta">
-    <h2 data-i18n="ui.ctaTitle">Interested in a team version?</h2>
-    <p data-i18n="ui.ctaIntro">We are considering team features such as pull-request checks in CI/CD, custom rules, and shared review history. Share questions and requests in GitHub Discussions. Feedback about why SQLMegane did not fit your workflow is equally useful.</p>
+    <h2 data-i18n="ui.ctaTitle">Development has ended. Reports and feedback are still welcome</h2>
+    <p data-i18n="ui.ctaIntro">The team version (CI/CD checks, custom rules, shared review history) will not be built. Questions about the current SQLMegane, and feedback about why it did not fit your workflow, are still accepted in GitHub Discussions; responses are best-effort and fixes are not guaranteed.</p>
     <p data-i18n="ui.ctaIssues">Bug reports, false positives, and missed detections are welcome in GitHub Issues. False-positive reports are especially helpful because noisy warnings quickly reduce trust.</p>
-    <a class="btn btn-primary cta-issue-link" href="https://github.com/selene-nyx-ai/sqlmegane/discussions/1" target="_blank" rel="noopener"><span data-i18n="ui.ctaQuestions">Questions and requests</span></a>
+    <a class="btn btn-primary cta-issue-link" href="https://github.com/selene-nyx-ai/sqlmegane/discussions/1" target="_blank" rel="noopener"><span data-i18n="ui.ctaQuestions">Questions and feedback</span></a>
     <a class="btn btn-ghost cta-issue-link" href="https://github.com/selene-nyx-ai/sqlmegane/discussions/2" target="_blank" rel="noopener"><span data-i18n="ui.ctaFeedback">Tell us why it did not fit</span></a>
     <a class="btn btn-ghost cta-issue-link" href="https://github.com/selene-nyx-ai/sqlmegane/issues" target="_blank" rel="noopener"><span data-i18n="ui.ctaBug">Report a false positive or missed detection</span></a>
   </section>
@@ -115,7 +120,7 @@
 
 <footer class="site-footer">
   <div class="container">
-    <p data-i18n="ui.footer">SQLMegane is a prototype under validation. It does not store or transmit data; all processing stays in this browser.</p>
+    <p data-i18n="ui.footer">SQLMegane is a prototype whose development ended on 2026-11-10. SQL analysis runs in this browser and the SQL is never sent anywhere; see the note above about access analytics.</p>
   </div>
 </footer>
 
